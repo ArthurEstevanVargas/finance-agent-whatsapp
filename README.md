@@ -39,7 +39,7 @@ Finza é um agente de IA que permite registrar gastos, entradas e comprovantes f
 O agente é implementado como um grafo de estados com LangGraph, onde cada nó tem uma responsabilidade isolada:
 
 ```
-WhatsApp → Z-API → FastAPI (Webhook)
+WhatsApp → Evolution API → FastAPI (Webhook)
                         ↓
                  [access_check]     ← valida trial / plano ativo
                         ↓
@@ -54,7 +54,7 @@ WhatsApp → Z-API → FastAPI (Webhook)
    query          → [query]              → Resumo financeiro
    unknown        → [fallback]           → Mensagem de ajuda
                         ↓
-                  Z-API → WhatsApp
+                  Evolution API → WhatsApp
 ```
 
 **Decisões de design:**
@@ -62,6 +62,7 @@ WhatsApp → Z-API → FastAPI (Webhook)
 - O nó `access_check` atua como middleware — bloqueia o fluxo se o trial expirou ou o plano está inativo
 - Áudios em `.ogg` são convertidos para `.mp3` via `ffmpeg` antes da transcrição
 - O nó `query` passa as últimas 20 transações individuais ao LLM, permitindo detalhamento por categoria
+- A integração WhatsApp usa um adapter Evolution API e um normalizador de webhook para manter o `FinanceAgent` independente do provedor
 
 ---
 
@@ -75,7 +76,7 @@ WhatsApp → Z-API → FastAPI (Webhook)
 | [FastAPI](https://fastapi.tiangolo.com/) | Servidor web e recepção de webhooks |
 | [SQLAlchemy](https://www.sqlalchemy.org/) | ORM com modelos `User` e `Transaction` |
 | [PostgreSQL](https://www.postgresql.org/) | Banco de dados relacional em produção |
-| [Z-API](https://z-api.io/) | Gateway de integração com WhatsApp |
+| [Evolution API](https://evolution-api.com/) | Gateway de integração com WhatsApp |
 | [Railway](https://railway.app/) | Deploy, hosting e banco gerenciado |
 | [ffmpeg](https://ffmpeg.org/) | Conversão de áudio `.ogg` → `.mp3` |
 
@@ -96,9 +97,10 @@ finance-agent-whatsapp/
 │   │   ├── transaction.py  # Model Transaction + enum TransactionType
 │   │   └── user.py         # Model User + enums OnboardingStep e PlanStatus
 │   ├── services/
-│   │   ├── audio.py        # Download, conversão e transcrição de áudio
-│   │   ├── database.py     # CRUD: usuários, transações e resumos
-│   │   └── zapi.py         # Envio de mensagens via Z-API
+│   │   ├── audio.py              # Download, conversão e transcrição de áudio
+│   │   ├── database.py           # CRUD: usuários, transações e resumos
+│   │   ├── evolution.py          # Envio de mensagens via Evolution API
+│   │   └── webhook_normalizer.py # Normalização de webhooks Evolution API
 │   └── main.py             # FastAPI + webhook POST /webhook
 ├── tests/
 │   └── test_agent.py       # Testes unitários
@@ -113,7 +115,7 @@ finance-agent-whatsapp/
 
 ## Como rodar localmente
 
-**Pré-requisitos:** Python 3.11+, ffmpeg, PostgreSQL, conta OpenAI e conta Z-API.
+**Pré-requisitos:** Python 3.11+, ffmpeg, PostgreSQL, conta OpenAI e uma instância Evolution API já criada e conectada ao WhatsApp.
 
 ```bash
 # 1. Clone e entre no projeto
@@ -139,16 +141,63 @@ uvicorn app.main:app --reload
 
 # 7. Exponha com ngrok
 ngrok http 8000
-# Cole a URL gerada no painel da Z-API → Webhooks → Ao receber
+# Configure a URL gerada na Evolution API:
+# https://<seu-ngrok-ou-app>/webhook?secret=<EVOLUTION_WEBHOOK_SECRET>
 ```
 
 **.env necessário:**
 ```env
 OPENAI_API_KEY=sk-...
-ZAPI_INSTANCE_ID=...
-ZAPI_TOKEN=...
-ZAPI_CLIENT_TOKEN=...
 DATABASE_URL=postgresql://user:password@localhost:5432/finza
+EVOLUTION_API_URL=https://sua-evolution.up.railway.app
+EVOLUTION_API_KEY=...
+EVOLUTION_INSTANCE_NAME=...
+EVOLUTION_WEBHOOK_SECRET=...
+```
+
+`DATABASE_URL` pertence ao banco do agente financeiro. Variáveis internas da implantação da Evolution API, como `AUTHENTICATION_API_KEY` e `DATABASE_CONNECTION_URI`, não são usadas por este app.
+
+### Configuração do webhook na Evolution API
+
+A instância Evolution API deve ser configurada fora da aplicação. O app não cria instância, não gera QR code e não pareia número.
+
+Endpoint operacional da Evolution API:
+
+```http
+POST /webhook/set/{instance}
+ApiKey: <EVOLUTION_API_KEY>
+Content-Type: application/json
+```
+
+Payload sugerido:
+
+```json
+{
+  "enabled": true,
+  "url": "https://seu-app.up.railway.app/webhook?secret=<EVOLUTION_WEBHOOK_SECRET>",
+  "webhookByEvents": false,
+  "webhookBase64": false,
+  "events": [
+    "MESSAGES_UPSERT",
+    "CONNECTION_UPDATE",
+    "QRCODE_UPDATED"
+  ]
+}
+```
+
+Envio de respostas pelo app:
+
+```http
+POST {EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE_NAME}
+ApiKey: <EVOLUTION_API_KEY>
+Content-Type: application/json
+```
+
+```json
+{
+  "number": "5541999999999",
+  "text": "Mensagem"
+}
 ```
 
 ---
@@ -162,6 +211,15 @@ RUN apt-get update && apt-get install -y ffmpeg
 ```
 
 As variáveis de ambiente são gerenciadas diretamente no painel do Railway. O banco PostgreSQL também é provisionado pelo Railway.
+
+Para validar manualmente a integração:
+
+1. Configure `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE_NAME`, `EVOLUTION_WEBHOOK_SECRET`, `DATABASE_URL` e `OPENAI_API_KEY`.
+2. Configure o webhook da Evolution API para `https://<app>/webhook?secret=<secret>`.
+3. Envie uma mensagem de texto para o número conectado e confirme nos logs o evento `MESSAGES_UPSERT`.
+4. Confirme que o agente processa a mensagem e responde pelo WhatsApp.
+5. Envie uma mensagem a partir do próprio WhatsApp conectado e confirme que ela é ignorada.
+6. Teste áudio e imagem e registre o formato do payload real caso a Evolution API entregue mídia sem URL pública.
 
 ---
 

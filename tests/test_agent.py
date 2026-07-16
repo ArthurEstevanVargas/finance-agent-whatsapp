@@ -134,7 +134,7 @@ class TestSaverNode:
         result = saver_node(state)
         mock_save.assert_called_once()
         assert "Gasto registrado" in result.response
-        assert "45.00" in result.response
+        assert "R$ 45,00" in result.response
         assert "Alimentação" in result.response
 
     @patch("app.agent.nodes.save_transaction")
@@ -151,7 +151,7 @@ class TestSaverNode:
         result = saver_node(state)
         mock_save.assert_called_once()
         assert "Entrada registrado" in result.response
-        assert "3200.00" in result.response
+        assert "R$ 3.200,00" in result.response
 
 
 # ─────────────────────────────────────────

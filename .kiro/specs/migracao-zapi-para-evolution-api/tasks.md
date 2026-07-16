@@ -1,0 +1,119 @@
+# Implementation Plan
+
+- [x] 1. Implement the Evolution API outbound messaging service
+  - Create `app/services/evolution.py` with `EvolutionService`.
+  - Add constructor support for explicit `api_url`, `api_key`, `instance_name`, and `timeout` arguments, falling back to environment variables.
+  - Normalize `EVOLUTION_API_URL` by removing trailing slashes.
+  - Implement shared phone normalization that removes JID suffixes such as `@s.whatsapp.net` and `@c.us`.
+  - Implement `send_text(phone, message)` with `POST {EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE_NAME}`.
+  - Send `ApiKey` and `Content-Type: application/json` headers.
+  - Send Evolution payload fields `number` and `text`.
+  - Use an explicit HTTP timeout.
+  - Return `True` for successful 2xx responses and `False` for HTTP or transport failures.
+  - Log HTTP status and response body for failures without logging `EVOLUTION_API_KEY`.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.3, 3.1, 3.2_
+
+- [x] 2. Add unit tests for the Evolution API service
+  - Add `tests/test_evolution_service.py`.
+  - Test that `send_text` posts to `/message/sendText/{instance}`.
+  - Test that the request includes the `ApiKey` header.
+  - Test that the JSON payload contains `number` and `text`.
+  - Test that outbound phone numbers have WhatsApp JID suffixes removed.
+  - Test that HTTP errors return `False`.
+  - Test that missing required Evolution configuration is reported clearly when sending.
+  - _Requirements: 1.2, 1.3, 1.4, 1.5, 1.6, 3.2, 10.1, 10.2, 10.3_
+
+- [x] 3. Implement the Evolution webhook normalizer
+  - Create `app/services/webhook_normalizer.py`.
+  - Define `NormalizedWebhookMessage` with `phone`, `from_me`, `text`, `image_url`, `image_caption`, `audio_url`, `raw_event`, `ignored`, and `ignore_reason`.
+  - Implement tolerant nested field extraction for root payloads and `data` payloads.
+  - Extract event names from `event`, `type`, or `data.event`.
+  - Treat `MESSAGES_UPSERT` and `messages.upsert` as message events.
+  - Ignore known non-message events such as `CONNECTION_UPDATE`, `QRCODE_UPDATED`, `MESSAGES_UPDATE`, `MESSAGES_DELETE`, and `SEND_MESSAGE`.
+  - Extract `from_me` from `fromMe`, `key.fromMe`, or `data.key.fromMe`.
+  - Extract phone from `data.key.remoteJid`, `key.remoteJid`, `data.sender`, `sender`, `data.remoteJid`, or `remoteJid`.
+  - Remove JID suffixes from normalized phone numbers.
+  - Extract text from `message.conversation` and `message.extendedTextMessage.text` variants.
+  - Extract image URL and caption from `imageMessage` and legacy-compatible `image` variants.
+  - Extract audio URL from `audioMessage` and legacy-compatible `audio` variants.
+  - Return ignored results for unsupported events, own messages, missing phone, and missing usable content.
+  - Avoid converting base64 media into files in this migration.
+  - _Requirements: 4.1, 4.4, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 6.1, 6.2, 7.1, 7.2, 7.3, 7.4, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+
+- [x] 4. Add unit tests for webhook normalization
+  - Add `tests/test_webhook_normalizer.py`.
+  - Test `MESSAGES_UPSERT` text extraction from `data.message.conversation`.
+  - Test root-level message extraction from `message.conversation`.
+  - Test extended text extraction from `message.extendedTextMessage.text`.
+  - Test phone extraction and JID suffix removal from `remoteJid`.
+  - Test ignoring `fromMe` and `key.fromMe` messages.
+  - Test ignoring non-message events.
+  - Test ignored results for missing phone and missing content.
+  - Test image URL and caption extraction.
+  - Test audio URL extraction.
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 9.1, 9.2, 9.3, 10.4, 10.5, 10.6_
+
+- [x] 5. Integrate Evolution service and normalizer into the FastAPI webhook
+  - Update `app/main.py` imports from `ZAPIService` to `EvolutionService`.
+  - Replace the global `zapi` instance with `whatsapp = EvolutionService()`.
+  - Remove `ZAPI_CLIENT_TOKEN` runtime usage.
+  - Parse the incoming JSON payload and normalize it before branching on content type.
+  - Return ignored responses for normalized messages marked as ignored.
+  - Route normalized image messages to `agent.process_image(phone, image_url, caption)`.
+  - Route normalized audio messages through `process_audio(audio_url)` and then `agent.process(phone, transcribed_text)`.
+  - Route normalized text messages to `agent.process(phone, text)`.
+  - Send agent responses through `whatsapp.send_text(phone, response)`.
+  - Preserve the existing instability fallback message using `whatsapp.send_text` when a normalized phone is available.
+  - Ensure non-message events and own messages do not call the agent or outbound send.
+  - _Requirements: 2.1, 2.2, 4.2, 4.3, 4.5, 6.3, 6.4, 6.5, 7.1, 7.4, 7.5, 9.6, 12.6_
+
+- [x] 6. Add webhook secret validation
+  - Add `EVOLUTION_WEBHOOK_SECRET` loading in `app/main.py`.
+  - Add a helper to validate the webhook secret before reading or processing message content.
+  - Allow requests without a secret when `EVOLUTION_WEBHOOK_SECRET` is not configured.
+  - Accept the configured secret via `?secret=<value>`.
+  - Optionally accept a configured header such as `X-Webhook-Secret` or `X-Evolution-Webhook-Secret`.
+  - Reject missing or invalid secrets with `401`.
+  - Ensure logs do not print the webhook secret.
+  - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 10.7_
+
+- [x] 7. Add FastAPI webhook integration tests
+  - Add `tests/test_webhook.py`.
+  - Mock the agent and WhatsApp service to avoid OpenAI, database, and network calls.
+  - Test that a valid Evolution text webhook calls the agent and sends the response.
+  - Test that an own message returns ignored and does not call the agent or send a response.
+  - Test that an unsupported event returns ignored and does not call the agent.
+  - Test that configured webhook secret rejects missing or wrong secrets with `401`.
+  - Test that the correct query string secret allows processing.
+  - _Requirements: 4.1, 4.2, 4.3, 4.5, 6.3, 6.4, 7.1, 7.4, 8.1, 8.2, 8.4, 8.5, 10.7_
+
+- [x] 8. Remove runtime dependency on Z-API configuration
+  - Verify `app/main.py` no longer imports or instantiates `ZAPIService`.
+  - Verify no runtime path requires `ZAPI_INSTANCE_ID`, `ZAPI_TOKEN`, or `ZAPI_CLIENT_TOKEN`.
+  - Decide whether to leave `app/services/zapi.py` unused temporarily or remove it if no imports remain.
+  - Search the codebase for runtime references to `ZAPI_*` and remove or isolate obsolete references.
+  - Verify the app still uses `DATABASE_URL` for its own database.
+  - Verify no code uses Evolution deployment variables such as `AUTHENTICATION_API_KEY` or `DATABASE_CONNECTION_URI`.
+  - _Requirements: 2.1, 2.2, 2.4, 3.3, 3.4, 12.3, 12.5_
+
+- [x] 9. Update environment and README documentation
+  - Update `.env.example` with `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE_NAME`, and `EVOLUTION_WEBHOOK_SECRET`.
+  - Remove Z-API variables from `.env.example` or mark them obsolete outside the required runtime configuration.
+  - Update README architecture from Z-API to Evolution API.
+  - Document `POST /message/sendText/{instance}` and the `ApiKey` header.
+  - Document expected webhook configuration using `POST /webhook/set/{instance}`.
+  - State that the Evolution API instance must already exist and be connected to WhatsApp.
+  - Clarify that `DATABASE_URL` belongs to this app and Evolution database variables do not.
+  - Avoid introducing `SERVER_URL` as an app variable.
+  - Add manual validation steps for text, own messages, audio, and image payload inspection.
+  - _Requirements: 2.5, 3.3, 3.4, 3.5, 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 12.1, 12.2_
+
+- [x] 10. Run automated validation and final migration checks
+  - Run the full test suite with `pytest`.
+  - Fix any regressions in existing agent tests caused by import or webhook changes.
+  - Confirm no `ZAPIService` import remains in runtime code.
+  - Confirm no `ZAPI_*` variable is required for test or app startup.
+  - Confirm `send_text(phone, message)` still exists as the internal outbound contract.
+  - Confirm no database migrations or schema changes were introduced.
+  - Capture any remaining media limitations as documented follow-up rather than expanding this migration scope.
+  - _Requirements: 1.1, 2.1, 2.2, 4.3, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 12.3, 12.4, 12.6_

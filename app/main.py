@@ -3,9 +3,10 @@ from dotenv import load_dotenv
 import logging
 import os
 
-from app.services.zapi import ZAPIService
+from app.services.evolution import EvolutionService
 from app.services.database import init_db, engine
 from app.services.audio import process_audio
+from app.services.webhook_normalizer import normalize_evolution_webhook
 from app.agent.graph import FinanceAgent
 
 load_dotenv()
@@ -13,7 +14,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN", "")
+EVOLUTION_WEBHOOK_SECRET = os.getenv("EVOLUTION_WEBHOOK_SECRET", "")
 
 app = FastAPI(
     title="Finance Agent WhatsApp",
@@ -21,7 +22,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-zapi = ZAPIService()
+whatsapp = EvolutionService()
 agent = FinanceAgent()
 
 
@@ -42,54 +43,61 @@ async def health():
     return {"status": "healthy"}
 
 
+def validate_webhook_secret(request: Request) -> None:
+    if not EVOLUTION_WEBHOOK_SECRET:
+        return
+
+    provided_secret = (
+        request.query_params.get("secret")
+        or request.headers.get("X-Webhook-Secret")
+        or request.headers.get("X-Evolution-Webhook-Secret")
+    )
+
+    if provided_secret != EVOLUTION_WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
     phone = None
     try:
+        validate_webhook_secret(request)
         payload = await request.json()
+        normalized = normalize_evolution_webhook(payload)
 
-        logger.info(f"📩 Webhook recebido: {payload}")
+        logger.info(
+            "Webhook Evolution recebido: event=%s ignored=%s reason=%s",
+            normalized.raw_event,
+            normalized.ignored,
+            normalized.ignore_reason,
+        )
 
-        if payload.get("fromMe"):
-            return {"status": "ignored"}
+        phone = normalized.phone
+        if normalized.ignored:
+            response = {"status": "ignored"}
+            if normalized.ignore_reason:
+                response["reason"] = normalized.ignore_reason
+            return response
 
-        phone = payload.get("phone")
-        if not phone:
-            return {"status": "ignored"}
-
-        image_data = payload.get("image")
-        audio_data = payload.get("audio")
-        message_data = payload.get("text", {})
-        message = message_data.get("message", "")
-
-        if image_data:
+        if normalized.image_url:
             # Usuário mandou foto
-            image_url = image_data.get("imageUrl", "") or image_data.get("url", "")
-            caption = image_data.get("caption", "")
-            logger.info(f"🖼️ Imagem recebida de {phone}: {image_url}")
-
-            if not image_url:
-                return {"status": "ignored"}
+            logger.info(f"🖼️ Imagem recebida de {phone}: {normalized.image_url}")
 
             response = await agent.process_image(
                 phone=phone,
-                image_url=image_url,
-                caption=caption,
+                image_url=normalized.image_url,
+                caption=normalized.image_caption or "",
             )
 
-        elif audio_data:
+        elif normalized.audio_url:
             # Usuário mandou áudio
-            audio_url = audio_data.get("audioUrl", "") or audio_data.get("url", "")
-            logger.info(f"🎙️ Áudio recebido de {phone}: {audio_url}")
-
-            if not audio_url:
-                return {"status": "ignored"}
+            logger.info(f"🎙️ Áudio recebido de {phone}: {normalized.audio_url}")
 
             # Transcreve o áudio para texto
-            transcribed_text = await process_audio(audio_url)
+            transcribed_text = await process_audio(normalized.audio_url)
 
             if not transcribed_text:
-                await zapi.send_text(
+                await whatsapp.send_text(
                     phone=phone,
                     message="Não consegui entender o áudio 😅 Tente novamente ou manda por texto!"
                 )
@@ -100,22 +108,25 @@ async def webhook(request: Request):
             # Processa o texto transcrito normalmente
             response = await agent.process(phone=phone, message=transcribed_text)
 
-        elif message:
+        elif normalized.text:
             # Usuário mandou texto
-            logger.info(f"📱 Mensagem de {phone}: {message}")
-            response = await agent.process(phone=phone, message=message)
+            logger.info(f"📱 Mensagem de {phone}: {normalized.text}")
+            response = await agent.process(phone=phone, message=normalized.text)
 
         else:
             return {"status": "ignored"}
 
-        await zapi.send_text(phone=phone, message=response)
+        await whatsapp.send_text(phone=phone, message=response)
         return {"status": "ok"}
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.error(f"❌ Erro no webhook: {e}")
         try:
             if phone:
-                await zapi.send_text(
+                await whatsapp.send_text(
                     phone=phone,
                     message="Ops! 😅 Tive uma instabilidade aqui. Tente novamente em instantes 🙏"
                 )

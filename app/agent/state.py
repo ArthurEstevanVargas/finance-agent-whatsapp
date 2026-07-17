@@ -1,4 +1,5 @@
 from typing import Optional
+from datetime import datetime
 from pydantic import BaseModel
 from app.models.transaction import TransactionType
 
@@ -7,6 +8,7 @@ class MessageIntent(str):
     EXPENSE = "expense"       # "gastei 45 no ifood"
     INCOME = "income"         # "recebi salário 3200"
     QUERY = "query"           # "quanto gastei essa semana?"
+    UPDATE_BUDGET = "update_budget"  # "alterar orçamento para 5000"
     UNKNOWN = "unknown"       # mensagem não reconhecida
 
 
@@ -27,3 +29,8 @@ class AgentState(BaseModel):
 
     # Resposta final que será enviada ao usuário
     response: Optional[str] = None
+
+    # Metadados opcionais de consulta
+    period_start: Optional[datetime] = None
+    period_end: Optional[datetime] = None
+    query_kind: Optional[str] = None

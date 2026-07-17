@@ -1,0 +1,128 @@
+# Implementation Plan
+
+- [x] 1. Add deterministic finance utility helpers
+  - Create `app/agent/finance_utils.py`.
+  - Implement `fmt_brl(value)` for consistent Brazilian currency formatting.
+  - Implement `parse_brl_amount(text)` for `4641.14`, `4.641,14`, `R$ 4.641,14`, `4641,14`, `4 mil`, and `quatro mil reais`.
+  - Implement `Period`, `QueryKind`, and `QueryRequest` dataclasses/enums.
+  - Implement `resolve_period(message, now=None)` for current month, previous month, named months, named month/year, and explicit last-30-days windows.
+  - Implement `parse_query_request(message, now=None)` for summary, extract, list income, list expenses, category detail, and salary/source queries.
+  - Implement fixed response formatters for transaction confirmations, budget update confirmations, help text, summary responses, list responses, category detail responses, and extract responses.
+  - Add unit tests for amount parsing, BRL formatting, period resolution, query parsing, help text, and fixed templates.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 5.1, 5.2, 5.3, 5.4, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 10.1, 10.2, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 15.2, 15.3, 15.4, 15.6, 15.7_
+
+- [x] 2. Add database support for period queries and pending confirmations
+  - Create `app/models/pending_confirmation.py` with `PendingConfirmation`.
+  - Import the pending confirmation model before `Base.metadata.create_all`.
+  - Extend `update_user_budget` to support `complete_onboarding=False`.
+  - Add `get_transactions(...)` with filters for date range, transaction type, category, text/description, and limit.
+  - Add `get_summary_for_period(phone, start_date, end_date)` that returns total income, total expense, balance, category totals, and count.
+  - Add `get_expenses_by_category_for_period(phone, start_date, end_date)`.
+  - Add `find_possible_duplicate_income(...)` for same-user salary/recurring income detection in the calendar month.
+  - Add pending confirmation helpers to create, read active, resolve, cancel, and ignore expired rows.
+  - Add database tests for date-range filtering, type filtering, category filtering, salary/source filtering, summary math, duplicate lookup, and pending confirmation lifecycle.
+  - _Requirements: 1.2, 1.3, 1.4, 1.5, 6.1, 6.2, 6.5, 6.6, 6.7, 6.8, 7.1, 7.2, 7.4, 8.1, 8.2, 8.4, 8.5, 8.7, 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 15.1, 15.8, 15.9_
+
+- [x] 3. Update agent state, prompts, and classifier routing
+  - Add `MessageIntent.UPDATE_BUDGET`.
+  - Add optional query metadata fields to `AgentState` only if needed by graph nodes.
+  - Update `CLASSIFIER_PROMPT` to return `expense`, `income`, `query`, `update_budget`, or `unknown`.
+  - Add prompt examples for ambiguous phrases such as `meu orçamento é 5000`, `tenho 5000 para gastar`, `recebi 5000`, `ganho 5000 por mês`, and `gastei 5000`.
+  - Update `QUERY_PROMPT` so it receives `monthly_budget`, explicit missing-budget state, totals, balance, budget available, period label, and filtered transaction details.
+  - Instruct the query prompt not to infer budget from income and to use professional tone with zero or at most one emoji.
+  - Update `classifier_node` to accept `update_budget` and keep invalid LLM responses as `unknown`.
+  - Add or update tests for all classifier intents and ambiguous examples.
+  - _Requirements: 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.6, 7.3, 7.7, 13.1, 13.2, 13.3, 13.4, 13.5, 13.6, 13.7, 13.8, 15.10_
+
+- [x] 4. Update onboarding, extraction, budget update, and confirmation templates
+  - Replace onboarding budget parsing with `parse_brl_amount`.
+  - Update onboarding copy to explain budget as the maximum monthly spending limit.
+  - Update onboarding copy to explain entries such as salary, food benefit, and freelances are registered separately.
+  - Update invalid onboarding budget response with Brazilian-format examples.
+  - Post-process `extractor_node` amount with `parse_brl_amount(state.message)` when confidently available.
+  - Add `budget_update_node` that parses the amount, updates `User.monthly_budget`, does not create a transaction, and returns a fixed confirmation.
+  - Replace `saver_node` emoji-heavy output with fixed templates for expenses and incomes.
+  - Replace `fallback_node` output with expanded professional help text.
+  - Add node tests for onboarding budget parsing, budget update without saving a transaction, invalid budget update, fixed expense/income templates, and help content.
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.6, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 7.1, 7.2, 7.4, 7.5, 7.6, 9.7, 9.8, 9.9, 11.1, 11.2, 11.3, 11.4, 11.5, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8, 15.5, 15.6, 15.7_
+
+- [x] 5. Implement duplicate salary confirmation flow
+  - Add `duplicate_income_check_node` after extraction and before saving.
+  - Detect same-user salary or recurring income with the same value in the current calendar month.
+  - Create or replace a pending confirmation row when a duplicate is detected.
+  - Return the standardized duplicate warning asking for `sim` or `não`.
+  - Add `pending_confirmation_node` after onboarding and before classification.
+  - Resolve affirmative replies by saving the pending transaction, marking the pending row resolved, and returning the normal income confirmation.
+  - Resolve negative replies by cancelling the pending row and returning `Registro cancelado.`
+  - Expire stale pending confirmations with a recommended 30-minute TTL.
+  - Ensure pending confirmation state is scoped by `phone`.
+  - Add tests for duplicate detection, duplicate warning, affirmative confirmation, negative cancellation, expired pending rows, and cross-user isolation.
+  - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 13.7, 15.9_
+
+- [x] 6. Rewire the LangGraph agent flow
+  - Add `pending_confirmation`, `budget_update`, and `duplicate_income_check` nodes to `build_graph`.
+  - Route `onboarding -> pending_confirmation`.
+  - Route `pending_confirmation -> END` when a response exists and `pending_confirmation -> classifier` otherwise.
+  - Route `classifier -> budget_update` for `update_budget`.
+  - Route `extractor -> duplicate_income_check`.
+  - Route `duplicate_income_check -> END` when a duplicate confirmation prompt exists and `duplicate_income_check -> saver` otherwise.
+  - Keep `saver`, `query`, `budget_update`, and `fallback` as terminal nodes.
+  - Keep `FinanceAgent.process(phone, message)` and `FinanceAgent.process_image(phone, image_url, caption)` public signatures unchanged.
+  - Add graph-level tests for budget update routing, duplicate pause routing, pending confirmation routing, and normal expense/income/query/fallback routing.
+  - _Requirements: 3.7, 7.4, 7.7, 8.3, 8.4, 8.5, 8.7, 13.7_
+
+- [x] 7. Rebuild query handling around calendar periods and deterministic totals
+  - Update `query_node` to fetch the user with `get_user(state.phone)` before building query context.
+  - Use `parse_query_request` and `resolve_period` instead of fixed `days=30` summaries.
+  - Use period-aware database helpers for totals, filtered transactions, category details, and source/salary queries.
+  - Calculate `total_income`, `total_expense`, `balance`, and `budget_available` in Python.
+  - Return summary responses that clearly separate monthly budget, entries, expenses, balance, and budget remaining.
+  - Return missing-budget responses without inferring budget from income.
+  - Return list income, list expense, category detail, salary/source, and no-results responses from filtered data.
+  - Indicate when a listing is limited and more matching transactions exist.
+  - Keep optional LLM wording only for unmatched query shapes, with structured data and anti-invention instructions.
+  - Add query tests for current month, previous month, last 30 days, named months, missing budget, filtered income, filtered expenses, category detail, salary received, no results, and limited result counts.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 6.1, 6.2, 6.4, 6.5, 6.6, 6.7, 6.8, 6.9, 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 15.1, 15.2, 15.3, 15.4_
+
+- [x] 8. Implement extrato mode
+  - Detect `extrato`, `extrato deste mês`, and `mostrar extrato do mês` as query/extract requests.
+  - Fetch entries and expenses separately for the resolved period.
+  - Format an extrato title with the calendar month label.
+  - Render an `Entradas` section with date, category or description, and value.
+  - Render a `Gastos` section with date, category, value, and description when available.
+  - Render empty-section messages when no entries or expenses exist.
+  - Render a summary with total entries, total expenses, balance, and budget remaining when budget exists.
+  - Use BRL formatting consistently throughout the extrato.
+  - Add tests for extrato with entries and expenses, extrato with empty sections, summary math, budget remaining, and BRL formatting.
+  - _Requirements: 6.3, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9, 15.8_
+
+- [x] 9. Update webhook/integration coverage for new financial behavior
+  - Add webhook or agent integration tests for budget update commands.
+  - Assert budget update responses are sent through the existing WhatsApp flow.
+  - Assert budget update changes `monthly_budget` and does not create an income transaction.
+  - Add integration coverage for duplicate salary prompt through the webhook path.
+  - Add integration coverage for affirmative duplicate confirmation through the webhook path.
+  - Add integration coverage for summary and extrato through the webhook path using calendar month data.
+  - Ensure participant-scoped identity from the existing group webhook behavior still scopes all budget, transaction, query, and pending confirmation operations by user phone.
+  - _Requirements: 1.7, 2.1, 2.2, 2.5, 7.1, 7.2, 7.4, 7.5, 8.1, 8.3, 8.4, 10.1, 10.7, 14.7, 15.1, 15.5, 15.8, 15.9_
+
+- [x] 10. Refresh user-facing copy and operational docs
+  - Update prompt constants for onboarding welcome, onboarding budget, onboarding done, invalid budget, query style, and fallback/help.
+  - Remove default emoji-heavy copy from registration, query, fallback, and onboarding responses.
+  - Keep no more than one emoji in any default response.
+  - Update README examples to include summary, extrato, category query, budget update, and Brazilian value formats if the README documents usage examples.
+  - Document the semantic difference between monthly budget, entries, balance, and budget remaining.
+  - Document that `mês` means calendar month unless the user asks for `últimos 30 dias`.
+  - Add manual validation steps for onboarding amount formats, summary, extrato, budget update, and duplicate salary confirmation.
+  - _Requirements: 1.1, 1.4, 1.5, 2.1, 2.5, 4.1, 4.2, 4.3, 4.4, 4.6, 11.1, 11.2, 11.5, 12.1, 12.8_
+
+- [x] 11. Run full validation and clean up regressions
+  - Run the full test suite with `pytest`.
+  - Fix regressions in existing agent, database, webhook, normalizer, and Evolution service tests.
+  - Verify existing group identity behavior still passes.
+  - Verify no public webhook endpoint contract changed.
+  - Verify no unnecessary database migration framework was introduced.
+  - Verify deterministic Python code, not the LLM, calculates budget, entries, expenses, balance, and budget remaining.
+  - Verify `monthly_budget` is never inferred from income in prompts or query responses.
+  - Verify all new task-related files are included in git status.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.1, 2.2, 2.5, 3.1, 3.4, 3.6, 4.1, 4.2, 5.1, 5.2, 6.7, 7.4, 8.7, 9.7, 10.7, 13.8, 14.7, 15.1, 15.2, 15.3, 15.4, 15.5, 15.6, 15.7, 15.8, 15.9, 15.10_

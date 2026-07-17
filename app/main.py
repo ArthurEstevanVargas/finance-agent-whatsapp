@@ -136,7 +136,7 @@ async def webhook(request: Request):
             if not transcribed_text:
                 await whatsapp.send_text(
                     phone=reply_to,
-                    message="Não consegui entender o áudio 😅 Tente novamente ou manda por texto!"
+                    message="Não consegui entender o áudio. Tente novamente ou mande por texto."
                 )
                 return {"status": "ok"}
 
@@ -162,7 +162,7 @@ async def webhook(request: Request):
             if reply_to:
                 await whatsapp.send_text(
                     phone=reply_to,
-                    message="Ops! 😅 Tive uma instabilidade aqui. Tente novamente em instantes 🙏"
+                    message="Tive uma instabilidade aqui. Tente novamente em instantes."
                 )
         except Exception:
             pass

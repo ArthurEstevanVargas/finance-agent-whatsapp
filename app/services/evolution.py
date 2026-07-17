@@ -33,9 +33,11 @@ class EvolutionService:
         instance_name: str | None = None,
         timeout: float = 15.0,
     ) -> None:
-        self.api_url = (api_url or os.getenv("EVOLUTION_API_URL") or "").rstrip("/")
-        self.api_key = api_key or os.getenv("EVOLUTION_API_KEY") or ""
-        self.instance_name = instance_name or os.getenv("EVOLUTION_INSTANCE_NAME") or ""
+        self.api_url = (os.getenv("EVOLUTION_API_URL") if api_url is None else api_url or "").rstrip("/")
+        self.api_key = os.getenv("EVOLUTION_API_KEY") if api_key is None else api_key
+        self.instance_name = os.getenv("EVOLUTION_INSTANCE_NAME") if instance_name is None else instance_name
+        self.api_key = self.api_key or ""
+        self.instance_name = self.instance_name or ""
         self.timeout = timeout
 
     def _validate_config(self) -> bool:

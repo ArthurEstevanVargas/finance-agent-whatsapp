@@ -1,9 +1,27 @@
 import json
 import logging
+from datetime import datetime, timedelta
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from app.agent.state import AgentState, MessageIntent
+from app.agent.finance_utils import (
+    QueryKind,
+    detect_category,
+    fmt_brl,
+    format_budget_updated,
+    format_category_detail,
+    format_extract,
+    format_help,
+    format_summary_response,
+    format_transaction_confirmation,
+    format_transaction_list,
+    is_salary_like,
+    normalize_text,
+    parse_brl_amount,
+    parse_query_request,
+    resolve_period,
+)
 from app.agent.prompts import (
     CLASSIFIER_PROMPT, EXTRACTOR_PROMPT, QUERY_PROMPT, IMAGE_EXTRACTOR_PROMPT,
     ONBOARDING_WELCOME_PROMPT, ONBOARDING_BUDGET_PROMPT,
@@ -12,13 +30,12 @@ from app.agent.prompts import (
 from app.models.transaction import TransactionType
 from app.models.user import OnboardingStep, PlanStatus
 from app.services.database import (
-    save_transaction, get_summary,
+    save_transaction,
     get_user, create_user, update_user_name, update_user_budget,
-    get_recent_transactions, get_transactions_by_category,
+    get_transactions, get_summary_for_period, find_possible_duplicate_income,
+    create_pending_confirmation, get_active_pending_confirmation,
+    resolve_pending_confirmation,
 )
-
-def fmt_brl(value: float) -> str:
-    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 logger = logging.getLogger(__name__)
 
@@ -94,16 +111,62 @@ def onboarding_node(state: AgentState) -> AgentState:
 
     # Aguardando orçamento
     if user.onboarding_step == OnboardingStep.WAITING_BUDGET:
-        try:
-            budget = float(state.message.strip().replace(",", ".").replace("R$", "").strip())
-            update_user_budget(state.phone, budget)
-            response = ONBOARDING_DONE_PROMPT.replace("{name}", user.name).replace("{budget:.2f}", f"{budget:.2f}")
-            return AgentState(**{**state.model_dump(), "response": response})
-        except ValueError:
+        budget = parse_brl_amount(state.message)
+        if budget is None:
             return AgentState(**{**state.model_dump(), "response": ONBOARDING_INVALID_BUDGET_PROMPT})
+        update_user_budget(state.phone, budget)
+        response = (
+            ONBOARDING_DONE_PROMPT
+            .replace("{name}", user.name or "")
+            .replace("{budget}", fmt_brl(budget))
+        )
+        return AgentState(**{**state.model_dump(), "response": response})
 
     # Onboarding já concluído → segue fluxo normal
     return AgentState(**{**state.model_dump(), "intent": None})
+
+
+# ─────────────────────────────────────────
+# NÓ 1A: Confirmação pendente
+# Resolve confirmações de duplicidade antes de classificar nova intenção
+# ─────────────────────────────────────────
+def pending_confirmation_node(state: AgentState) -> AgentState:
+    pending = get_active_pending_confirmation(state.phone, action_type="duplicate_income")
+    if not pending:
+        return AgentState(**{**state.model_dump(), "intent": None})
+
+    text = normalize_text(state.message).strip()
+    affirmative = {"sim", "s", "yes", "pode registrar", "registrar mesmo assim"}
+    negative = {"nao", "não", "n", "cancelar"}
+
+    if text in affirmative:
+        payload = json.loads(pending.payload_json)
+        transaction_type = TransactionType(payload["transaction_type"])
+        save_transaction(
+            phone=state.phone,
+            type=transaction_type,
+            amount=payload["amount"],
+            category=payload["category"],
+            description=payload.get("description"),
+        )
+        resolve_pending_confirmation(pending.id, "resolved")
+        response = format_transaction_confirmation(
+            transaction_type,
+            payload["amount"],
+            payload["category"],
+            payload.get("description"),
+        )
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    if text in negative:
+        resolve_pending_confirmation(pending.id, "cancelled")
+        return AgentState(**{**state.model_dump(), "response": "Registro cancelado."})
+
+    if any(keyword in text for keyword in ("gastei", "paguei", "recebi", "orcamento", "orçamento", "resumo", "extrato")):
+        return AgentState(**{**state.model_dump(), "intent": None})
+
+    response = 'Você tem um registro pendente. Responda "sim" para registrar ou "não" para cancelar.'
+    return AgentState(**{**state.model_dump(), "response": response})
 
 
 # ─────────────────────────────────────────
@@ -117,7 +180,7 @@ def classifier_node(state: AgentState) -> AgentState:
     response = llm.invoke([HumanMessage(content=prompt)])
     intent = response.content.strip().lower()
 
-    if intent not in ["expense", "income", "query"]:
+    if intent not in ["expense", "income", "query", "update_budget"]:
         intent = MessageIntent.UNKNOWN
 
     logger.info(f"✅ Intenção detectada: {intent}")
@@ -148,16 +211,28 @@ def extractor_node(state: AgentState) -> AgentState:
         transaction_type = (
             TransactionType.INCOME if state.intent == "income" else TransactionType.EXPENSE
         )
+        parsed_amount = parse_brl_amount(state.message)
+        amount = parsed_amount if parsed_amount is not None else data.get("amount", 0.0)
         return AgentState(**{
             **state.model_dump(),
-            "amount": data.get("amount", 0.0),
+            "amount": amount,
             "category": data.get("category", "Outros"),
             "description": data.get("description", ""),
             "transaction_type": transaction_type,
         })
     except json.JSONDecodeError:
         logger.error(f"❌ Erro ao parsear JSON do extrator: {response.content}")
-        return AgentState(**{**state.model_dump(), "amount": 0.0, "category": "Outros"})
+        parsed_amount = parse_brl_amount(state.message) or 0.0
+        transaction_type = (
+            TransactionType.INCOME if state.intent == "income" else TransactionType.EXPENSE
+        )
+        return AgentState(**{
+            **state.model_dump(),
+            "amount": parsed_amount,
+            "category": "Outros",
+            "description": "",
+            "transaction_type": transaction_type,
+        })
 
 
 # ─────────────────────────────────────────
@@ -205,6 +280,60 @@ def image_extractor_node(state: AgentState) -> AgentState:
 
 
 # ─────────────────────────────────────────
+# NÓ 2C: Checagem de duplicidade de entrada recorrente
+# ─────────────────────────────────────────
+def duplicate_income_check_node(state: AgentState) -> AgentState:
+    if state.transaction_type != TransactionType.INCOME:
+        return AgentState(**state.model_dump())
+    if not is_salary_like(state.category, state.description):
+        return AgentState(**state.model_dump())
+    if state.amount is None:
+        return AgentState(**state.model_dump())
+
+    period = resolve_period("esse mês")
+    duplicate = find_possible_duplicate_income(
+        phone=state.phone,
+        amount=state.amount,
+        start_date=period.start,
+        end_date=period.end,
+        category=state.category or "",
+        description=state.description,
+    )
+    if not duplicate:
+        return AgentState(**state.model_dump())
+
+    create_pending_confirmation(
+        phone=state.phone,
+        action_type="duplicate_income",
+        payload={
+            "transaction_type": TransactionType.INCOME.value,
+            "amount": state.amount,
+            "category": state.category or "Salário",
+            "description": state.description or "",
+        },
+        expires_at=datetime.utcnow() + timedelta(minutes=30),
+    )
+    response = (
+        f"Você já registrou uma entrada de {state.category or 'Salário'} "
+        f"de {fmt_brl(state.amount)} neste mês.\n"
+        'Deseja registrar outra mesmo assim? Responda "sim" para registrar ou "não" para cancelar.'
+    )
+    return AgentState(**{**state.model_dump(), "response": response})
+
+
+# ─────────────────────────────────────────
+# NÓ 2D: Atualização de orçamento
+# ─────────────────────────────────────────
+def budget_update_node(state: AgentState) -> AgentState:
+    amount = parse_brl_amount(state.message)
+    if amount is None:
+        return AgentState(**{**state.model_dump(), "response": ONBOARDING_INVALID_BUDGET_PROMPT})
+
+    update_user_budget(state.phone, amount, complete_onboarding=False)
+    return AgentState(**{**state.model_dump(), "response": format_budget_updated(amount)})
+
+
+# ─────────────────────────────────────────
 # NÓ 3: Salvar transação
 # Persiste no banco e gera resposta de confirmação
 # ─────────────────────────────────────────
@@ -219,14 +348,11 @@ def saver_node(state: AgentState) -> AgentState:
         description=state.description,
     )
 
-    emoji = "💸" if state.transaction_type == TransactionType.EXPENSE else "💰"
-    tipo = "Gasto" if state.transaction_type == TransactionType.EXPENSE else "Entrada"
-
-    response = (
-        f"{emoji} *{tipo} registrado!*\n\n"
-        f"📌 Categoria: {state.category}\n"
-        f"💵 Valor: {fmt_brl(state.amount)}\n"
-        f"📝 Descrição: {state.description or '-'}"
+    response = format_transaction_confirmation(
+        state.transaction_type,
+        state.amount,
+        state.category,
+        state.description,
     )
 
     return AgentState(**{**state.model_dump(), "response": response})
@@ -239,27 +365,104 @@ def saver_node(state: AgentState) -> AgentState:
 def query_node(state: AgentState) -> AgentState:
     logger.info(f"📊 Consultando resumo para {state.phone}")
 
-    summary = get_summary(phone=state.phone, days=30)
-    recent = get_recent_transactions(phone=state.phone, limit=20)
+    user = get_user(state.phone)
+    request = parse_query_request(state.message)
+    summary = get_summary_for_period(state.phone, request.period.start, request.period.end)
+    monthly_budget = user.monthly_budget if user else None
 
-    # Formata transações individuais para o LLM
-    transactions_detail = ""
-    for t in recent:
-        tipo = "gasto" if t.type == TransactionType.EXPENSE else "entrada"
-        data = t.created_at.strftime("%d/%m")
-        transactions_detail += f"- {data} | {tipo} | {t.category} | R$ {t.amount:.2f} | {t.description or '-'}\n"
+    if request.kind == QueryKind.HELP:
+        return AgentState(**{**state.model_dump(), "response": format_help()})
 
-    prompt = QUERY_PROMPT.format(
-        total_income=f"{summary['total_income']:.2f}",
-        total_expense=f"{summary['total_expense']:.2f}",
-        balance=f"{summary['balance']:.2f}",
-        expenses_by_category=summary["expenses_by_category"],
-        transactions_detail=transactions_detail,
-        message=state.message,
+    if request.kind == QueryKind.EXTRACT:
+        incomes = get_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.INCOME,
+            limit=request.limit,
+        )
+        expenses = get_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.EXPENSE,
+            limit=request.limit,
+        )
+        response = format_extract(request.period, incomes, expenses, monthly_budget)
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    if request.kind == QueryKind.LIST_INCOME:
+        transactions = get_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.INCOME,
+            limit=request.limit + 1,
+        )
+        limit_reached = len(transactions) > request.limit
+        response = format_transaction_list(
+            f"Entradas de {request.period.label}",
+            transactions[:request.limit],
+            "Não encontrei entradas nesse período.",
+            limit_reached,
+        )
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    if request.kind == QueryKind.LIST_EXPENSE:
+        transactions = get_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.EXPENSE,
+            limit=request.limit + 1,
+        )
+        limit_reached = len(transactions) > request.limit
+        response = format_transaction_list(
+            f"Gastos de {request.period.label}",
+            transactions[:request.limit],
+            "Não encontrei gastos nesse período.",
+            limit_reached,
+        )
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    if request.kind == QueryKind.CATEGORY_DETAIL:
+        transactions = get_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.EXPENSE,
+            category=request.category,
+            limit=request.limit,
+        )
+        response = format_category_detail(request.period, request.category or "categoria", transactions)
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    if request.kind == QueryKind.INCOME_BY_SOURCE:
+        transactions = get_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.INCOME,
+            text_filter=request.text_filter or request.category,
+            limit=request.limit,
+        )
+        total = sum(t.amount for t in transactions)
+        response = format_transaction_list(
+            f"Entradas de {request.category or 'fonte'} em {request.period.label}",
+            transactions,
+            "Não encontrei entradas para esse filtro.",
+        )
+        if transactions:
+            response = f"{response}\n\nTotal: {fmt_brl(total)}"
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    response = format_summary_response(
+        request.period,
+        monthly_budget,
+        summary["total_income"],
+        summary["total_expense"],
     )
-
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return AgentState(**{**state.model_dump(), "response": response.content.strip()})
+    return AgentState(**{**state.model_dump(), "response": response})
 
 
 # ─────────────────────────────────────────
@@ -267,11 +470,4 @@ def query_node(state: AgentState) -> AgentState:
 # Responde quando não entende a mensagem
 # ─────────────────────────────────────────
 def fallback_node(state: AgentState) -> AgentState:
-    response = (
-        "🤖 Não entendi sua mensagem. Tente algo como:\n\n"
-        "💸 *Registrar gasto:* \"gastei 45 no ifood\"\n"
-        "💰 *Registrar entrada:* \"recebi 3200 de salário\"\n"
-        "📊 *Ver resumo:* \"quanto gastei esse mês?\"\n"
-        "🖼️ *Comprovante:* envie uma foto do recibo"
-    )
-    return AgentState(**{**state.model_dump(), "response": response})
+    return AgentState(**{**state.model_dump(), "response": format_help()})

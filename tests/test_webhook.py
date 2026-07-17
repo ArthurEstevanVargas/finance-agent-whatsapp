@@ -239,7 +239,7 @@ async def test_webhook_sends_audio_failure_message_to_group(monkeypatch):
     agent.process.assert_not_awaited()
     whatsapp.send_text.assert_awaited_once_with(
         phone=GROUP_JID,
-        message="Não consegui entender o áudio 😅 Tente novamente ou manda por texto!",
+        message="Não consegui entender o áudio. Tente novamente ou mande por texto.",
     )
 
 

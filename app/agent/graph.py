@@ -5,9 +5,12 @@ from app.agent.state import AgentState, MessageIntent
 from app.agent.nodes import (
     access_check_node,
     onboarding_node,
+    pending_confirmation_node,
     classifier_node,
     extractor_node,
     image_extractor_node,
+    duplicate_income_check_node,
+    budget_update_node,
     saver_node,
     query_node,
     fallback_node,
@@ -27,7 +30,14 @@ def route_onboarding(state: AgentState) -> str:
     """Decide se continua o onboarding ou segue para o fluxo normal."""
     if state.response is not None:
         return "end"  # Onboarding ainda em andamento → responde e termina
-    return "classifier"  # Onboarding concluído → segue fluxo normal
+    return "pending_confirmation"  # Onboarding concluído → segue fluxo normal
+
+
+def route_pending_confirmation(state: AgentState) -> str:
+    """Decide se uma confirmação pendente encerrou o fluxo."""
+    if state.response is not None:
+        return "end"
+    return "classifier"
 
 
 def route(state: AgentState) -> str:
@@ -36,8 +46,17 @@ def route(state: AgentState) -> str:
         return "extractor"
     elif state.intent == "query":
         return "query"
+    elif state.intent == "update_budget":
+        return "budget_update"
     else:
         return "fallback"
+
+
+def route_duplicate_check(state: AgentState) -> str:
+    """Decide se duplicidade pausou o salvamento."""
+    if state.response is not None:
+        return "end"
+    return "saver"
 
 
 def build_graph():
@@ -46,9 +65,12 @@ def build_graph():
     # Adiciona os nós
     graph.add_node("access_check", access_check_node)
     graph.add_node("onboarding", onboarding_node)
+    graph.add_node("pending_confirmation", pending_confirmation_node)
     graph.add_node("classifier", classifier_node)
     graph.add_node("extractor", extractor_node)
     graph.add_node("image_extractor", image_extractor_node)
+    graph.add_node("duplicate_income_check", duplicate_income_check_node)
+    graph.add_node("budget_update", budget_update_node)
     graph.add_node("saver", saver_node)
     graph.add_node("query", query_node)
     graph.add_node("fallback", fallback_node)
@@ -72,6 +94,15 @@ def build_graph():
         route_onboarding,
         {
             "end": END,
+            "pending_confirmation": "pending_confirmation",
+        }
+    )
+
+    graph.add_conditional_edges(
+        "pending_confirmation",
+        route_pending_confirmation,
+        {
+            "end": END,
             "classifier": "classifier",
         }
     )
@@ -83,12 +114,22 @@ def build_graph():
         {
             "extractor": "extractor",
             "query": "query",
+            "budget_update": "budget_update",
             "fallback": "fallback",
         }
     )
 
-    # Após extrator de texto → salva no banco
-    graph.add_edge("extractor", "saver")
+    # Após extrator de texto → checa duplicidade antes de salvar
+    graph.add_edge("extractor", "duplicate_income_check")
+
+    graph.add_conditional_edges(
+        "duplicate_income_check",
+        route_duplicate_check,
+        {
+            "end": END,
+            "saver": "saver",
+        }
+    )
 
     # Após extrator de imagem → salva no banco
     graph.add_edge("image_extractor", "saver")
@@ -96,6 +137,7 @@ def build_graph():
     # Nós finais → END
     graph.add_edge("saver", END)
     graph.add_edge("query", END)
+    graph.add_edge("budget_update", END)
     graph.add_edge("fallback", END)
 
     return graph.compile()

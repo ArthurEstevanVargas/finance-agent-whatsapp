@@ -12,12 +12,14 @@ Finza é um agente de IA que permite registrar gastos, entradas e comprovantes f
 
 | Entrada | Resposta |
 |---|---|
-| `"gastei 47 no mercado"` | 💸 Gasto registrado · Alimentação · R$ 47,00 |
-| `"recebi 3200 de salário"` | 💰 Entrada registrada · Salário · R$ 3.200,00 |
-| 🎤 áudio: `"paguei 40 na Netflix"` | 💸 Gasto registrado · Lazer · R$ 40,00 |
-| 📸 foto do cupom fiscal | 💸 Extração automática de valor e categoria |
-| `"quanto gastei esse mês?"` | 📊 Resumo com saldo e breakdown por categoria |
-| `"detalha meus gastos em alimentação"` | 📋 Lista cada transação com data e valor |
+| `"gastei 47 no mercado"` | Gasto registrado · Alimentação · R$ 47,00 |
+| `"recebi 3200 de salário"` | Entrada registrada · Salário · R$ 3.200,00 |
+| 🎤 áudio: `"paguei 40 na Netflix"` | Gasto registrado · Lazer · R$ 40,00 |
+| 📸 foto do cupom fiscal | Extração automática de valor e categoria |
+| `"resumo do mês"` | Orçamento, entradas, gastos, saldo e orçamento restante |
+| `"extrato deste mês"` | Entradas e gastos separados por data |
+| `"alterar orçamento para 5000"` | Orçamento mensal atualizado para R$ 5.000,00 |
+| `"quanto gastei com alimentação?"` | Lista filtrada por categoria e período |
 
 ---
 
@@ -26,7 +28,9 @@ Finza é um agente de IA que permite registrar gastos, entradas e comprovantes f
 - **Linguagem natural** — entende o jeito que o usuário fala, sem comandos rígidos
 - **Mensagens de voz** — transcrição automática via OpenAI Whisper
 - **Foto de comprovante** — extração de valor e categoria via GPT-4o Vision
-- **Resumos inteligentes** — consultas livres sobre gastos, categorias e saldo
+- **Resumos inteligentes** — consultas sobre orçamento, entradas, gastos, saldo e categorias
+- **Extrato mensal** — entradas e gastos separados com resumo do período
+- **Atualização de orçamento** — alteração do orçamento mensal por mensagem
 - **Categorização automática** — Alimentação, Transporte, Lazer, Saúde e mais
 - **Onboarding conversacional** — coleta nome e orçamento mensal na primeira interação
 - **Sistema de trial e planos** — 7 dias grátis, com planos Mensal, Trimestral e Semestral
@@ -46,13 +50,16 @@ WhatsApp → Evolution API → FastAPI (Webhook)
                         ↓
                   [onboarding]      ← coleta nome e orçamento (primeira vez)
                         ↓
+                  [pending_confirmation]
+                        ↓
            ┌────────────┴──────────────────┐
         texto                         imagem / áudio
            ↓                               ↓
       [classifier]               [image_extractor]
            ↓                     [audio → Whisper → texto → classifier]
-   expense/income → [extractor] → [saver] → PostgreSQL
-   query          → [query]              → Resumo financeiro
+   expense/income → [extractor] → [duplicate_income_check] → [saver] → PostgreSQL
+   update_budget  → [budget_update]      → User.monthly_budget
+   query          → [query]              → Resumo/extrato financeiro
    unknown        → [fallback]           → Mensagem de ajuda
                         ↓
                   Evolution API → WhatsApp
@@ -62,7 +69,9 @@ WhatsApp → Evolution API → FastAPI (Webhook)
 - Cada nó do grafo é uma função pura com entrada e saída tipadas via `AgentState` (Pydantic)
 - O nó `access_check` atua como middleware — bloqueia o fluxo se o trial expirou ou o plano está inativo
 - Áudios em `.ogg` são convertidos para `.mp3` via `ffmpeg` antes da transcrição
-- O nó `query` passa as últimas 20 transações individuais ao LLM, permitindo detalhamento por categoria
+- O nó `query` usa períodos de calendário, filtros de banco e cálculos determinísticos antes de qualquer redação por LLM
+- O orçamento mensal vem de `User.monthly_budget`; entradas nunca são usadas para inventar orçamento
+- "Mês" significa mês calendário, exceto quando o usuário pede explicitamente "últimos 30 dias"
 - A integração WhatsApp usa um adapter Evolution API e um normalizador de webhook para manter o `FinanceAgent` independente do provedor
 - Em grupos, `remoteJid` identifica o chat de resposta e o participante da mensagem identifica o usuário financeiro
 
@@ -90,12 +99,15 @@ WhatsApp → Evolution API → FastAPI (Webhook)
 finance-agent-whatsapp/
 ├── app/
 │   ├── agent/
+│   │   ├── finance_utils.py # Parser BRL, períodos, filtros e templates
 │   │   ├── graph.py        # Grafo LangGraph + classe FinanceAgent
 │   │   ├── nodes.py        # Nós: access_check, onboarding, classifier,
-│   │   │                   #      extractor, image_extractor, saver, query, fallback
+│   │   │                   #      extractor, budget_update, duplicate check,
+│   │   │                   #      saver, query, fallback
 │   │   ├── prompts.py      # Prompts do LLM 
 │   │   └── state.py        # AgentState (Pydantic) + enum MessageIntent
 │   ├── models/
+│   │   ├── pending_confirmation.py # Confirmações pendentes de duplicidade
 │   │   ├── transaction.py  # Model Transaction + enum TransactionType
 │   │   └── user.py         # Model User + enums OnboardingStep e PlanStatus
 │   ├── services/
@@ -176,6 +188,35 @@ user_phone: 5541999999999
 
 O `FinanceAgent` recebe `user_phone`, então `users.phone` e `transactions.phone` continuam representando o participante. O `EvolutionService` recebe `reply_to`, preservando o JID `@g.us` para envio da resposta ao grupo.
 
+### Orçamento, entradas e períodos
+
+O orçamento mensal é o limite planejado de gasto do usuário, salvo em `User.monthly_budget`. Ele não é calculado a partir de entradas.
+
+- **Entradas:** dinheiro recebido, como salário, vale alimentação ou freelances.
+- **Gastos:** dinheiro gasto em categorias como alimentação, transporte e moradia.
+- **Saldo:** entradas menos gastos.
+- **Orçamento restante:** orçamento mensal menos gastos.
+
+Consultas com "mês" usam mês calendário:
+
+- `esse mês` ou `resumo do mês`: do dia 1 até hoje.
+- `mês passado`: mês calendário anterior completo.
+- `julho`: mês específico.
+- `últimos 30 dias`: janela móvel apenas quando solicitado.
+
+Comandos úteis:
+
+```text
+gastei 45 no iFood
+recebi 3200 de salário
+resumo do mês
+extrato deste mês
+alterar orçamento para 5000
+quanto gastei com alimentação?
+```
+
+Valores aceitos incluem `4641.14`, `4.641,14`, `R$ 4.641,14`, `4641,14`, `4 mil` e `quatro mil reais`.
+
 ### Configuração do webhook na Evolution API
 
 A instância Evolution API deve ser configurada fora da aplicação. O app não cria instância, não gera QR code e não pareia número.
@@ -242,6 +283,11 @@ Para validar manualmente a integração:
 7. Envie uma mensagem a partir do próprio WhatsApp conectado e confirme que ela é ignorada.
 8. Envie comandos de dois participantes no mesmo grupo e confirme que os históricos financeiros ficam separados.
 9. Teste áudio e imagem no grupo autorizado e registre o formato do payload real caso a Evolution API entregue mídia sem URL pública.
+10. Faça onboarding com `R$ 4.641,14` e confirme que o valor é aceito como orçamento mensal.
+11. Registre salário e gasto, depois envie `resumo do mês` e confirme orçamento, entradas, gastos, saldo e orçamento restante separados.
+12. Envie `extrato deste mês` e confirme entradas e gastos em seções separadas.
+13. Envie `alterar orçamento para 5000` e confirme que o orçamento muda sem criar entrada.
+14. Tente registrar o mesmo salário duas vezes no mês e confirme que o agente pede autorização antes de salvar.
 
 ---
 

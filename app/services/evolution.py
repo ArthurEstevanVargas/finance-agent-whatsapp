@@ -14,6 +14,9 @@ def _normalize_phone(phone: str | None) -> str:
         return ""
 
     normalized = str(phone).strip()
+    if normalized.endswith("@g.us"):
+        return normalized
+
     for suffix in ("@s.whatsapp.net", "@c.us"):
         if suffix in normalized:
             normalized = normalized.split(suffix, 1)[0]

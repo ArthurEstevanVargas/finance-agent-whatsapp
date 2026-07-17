@@ -31,6 +31,7 @@ Finza é um agente de IA que permite registrar gastos, entradas e comprovantes f
 - **Onboarding conversacional** — coleta nome e orçamento mensal na primeira interação
 - **Sistema de trial e planos** — 7 dias grátis, com planos Mensal, Trimestral e Semestral
 - **Histórico por usuário** — cada número de WhatsApp tem seu próprio contexto financeiro
+- **Grupo autorizado** — permite usar um grupo específico compartilhado, mantendo o histórico separado por participante
 
 ---
 
@@ -63,6 +64,7 @@ WhatsApp → Evolution API → FastAPI (Webhook)
 - Áudios em `.ogg` são convertidos para `.mp3` via `ffmpeg` antes da transcrição
 - O nó `query` passa as últimas 20 transações individuais ao LLM, permitindo detalhamento por categoria
 - A integração WhatsApp usa um adapter Evolution API e um normalizador de webhook para manter o `FinanceAgent` independente do provedor
+- Em grupos, `remoteJid` identifica o chat de resposta e o participante da mensagem identifica o usuário financeiro
 
 ---
 
@@ -153,9 +155,26 @@ EVOLUTION_API_URL=https://sua-evolution.up.railway.app
 EVOLUTION_API_KEY=...
 EVOLUTION_INSTANCE_NAME=...
 EVOLUTION_WEBHOOK_SECRET=...
+ALLOWED_GROUP_JID=1203630xxxx@g.us
 ```
 
 `DATABASE_URL` pertence ao banco do agente financeiro. Variáveis internas da implantação da Evolution API, como `AUTHENTICATION_API_KEY` e `DATABASE_CONNECTION_URI`, não são usadas por este app.
+
+### Grupo autorizado e identidade financeira
+
+Nesta configuração, o webhook processa somente mensagens recebidas no grupo definido por `ALLOWED_GROUP_JID`. Mensagens privadas e mensagens de outros grupos são ignoradas por padrão.
+
+Em mensagens de grupo, a Evolution API envia o grupo em `remoteJid` com sufixo `@g.us`. O app usa esse valor como `reply_to`, ou seja, o destino da resposta. A identidade financeira vem do participante da mensagem, em campos como `data.key.participant`, `key.participant`, `data.participant`, `participant`, `data.sender` ou `sender`.
+
+Exemplo:
+
+```text
+chat_jid / reply_to: 1203630xxxx@g.us
+participant_jid: 5541999999999@s.whatsapp.net
+user_phone: 5541999999999
+```
+
+O `FinanceAgent` recebe `user_phone`, então `users.phone` e `transactions.phone` continuam representando o participante. O `EvolutionService` recebe `reply_to`, preservando o JID `@g.us` para envio da resposta ao grupo.
 
 ### Configuração do webhook na Evolution API
 
@@ -214,12 +233,15 @@ As variáveis de ambiente são gerenciadas diretamente no painel do Railway. O b
 
 Para validar manualmente a integração:
 
-1. Configure `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE_NAME`, `EVOLUTION_WEBHOOK_SECRET`, `DATABASE_URL` e `OPENAI_API_KEY`.
+1. Configure `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE_NAME`, `EVOLUTION_WEBHOOK_SECRET`, `ALLOWED_GROUP_JID`, `DATABASE_URL` e `OPENAI_API_KEY`.
 2. Configure o webhook da Evolution API para `https://<app>/webhook?secret=<secret>`.
-3. Envie uma mensagem de texto para o número conectado e confirme nos logs o evento `MESSAGES_UPSERT`.
-4. Confirme que o agente processa a mensagem e responde pelo WhatsApp.
-5. Envie uma mensagem a partir do próprio WhatsApp conectado e confirme que ela é ignorada.
-6. Teste áudio e imagem e registre o formato do payload real caso a Evolution API entregue mídia sem URL pública.
+3. Envie uma mensagem de texto no grupo autorizado e confirme nos logs o evento `MESSAGES_UPSERT`.
+4. Confirme que o agente processa a mensagem com o telefone do participante e responde no grupo.
+5. Envie uma mensagem em conversa privada e confirme que ela é ignorada.
+6. Envie uma mensagem em outro grupo e confirme que ela é ignorada.
+7. Envie uma mensagem a partir do próprio WhatsApp conectado e confirme que ela é ignorada.
+8. Envie comandos de dois participantes no mesmo grupo e confirme que os históricos financeiros ficam separados.
+9. Teste áudio e imagem no grupo autorizado e registre o formato do payload real caso a Evolution API entregue mídia sem URL pública.
 
 ---
 

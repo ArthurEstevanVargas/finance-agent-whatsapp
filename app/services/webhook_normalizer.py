@@ -10,12 +10,18 @@ IGNORED_EVENTS = {
     "MESSAGES_DELETE",
     "SEND_MESSAGE",
 }
-JID_SUFFIXES = ("@s.whatsapp.net", "@c.us")
+GROUP_JID_SUFFIX = "@g.us"
+USER_JID_SUFFIXES = ("@s.whatsapp.net", "@c.us")
 
 
 @dataclass(frozen=True)
 class NormalizedWebhookMessage:
     phone: str | None
+    chat_jid: str | None
+    participant_jid: str | None
+    user_phone: str | None
+    reply_to: str | None
+    is_group: bool
     from_me: bool
     text: str | None
     image_url: str | None
@@ -51,12 +57,21 @@ def normalize_whatsapp_phone(value: str | None) -> str | None:
     if not normalized:
         return None
 
-    for suffix in JID_SUFFIXES:
+    if is_group_jid(normalized):
+        return None
+
+    for suffix in USER_JID_SUFFIXES:
         if suffix in normalized:
             normalized = normalized.split(suffix, 1)[0]
             break
 
     return normalized or None
+
+
+def is_group_jid(value: str | None) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().endswith(GROUP_JID_SUFFIX)
 
 
 def _as_bool(value: Any) -> bool:
@@ -70,6 +85,11 @@ def _as_bool(value: Any) -> bool:
 def _ignored(raw_event: str | None, reason: str, from_me: bool = False) -> NormalizedWebhookMessage:
     return NormalizedWebhookMessage(
         phone=None,
+        chat_jid=None,
+        participant_jid=None,
+        user_phone=None,
+        reply_to=None,
+        is_group=False,
         from_me=from_me,
         text=None,
         image_url=None,
@@ -93,21 +113,75 @@ def normalize_evolution_webhook(payload: dict[str, Any]) -> NormalizedWebhookMes
     if from_me:
         return _ignored(raw_event, "from_me", from_me=True)
 
-    phone = normalize_whatsapp_phone(
-        _first_value(
+    chat_jid = _first_value(
+        payload,
+        (
+            "data.key.remoteJid",
+            "key.remoteJid",
+            "data.remoteJid",
+            "remoteJid",
+            "data.sender",
+            "sender",
+        ),
+    )
+    chat_jid = str(chat_jid).strip() if chat_jid is not None else None
+    if not chat_jid:
+        return _ignored(raw_event, "missing_chat_jid")
+
+    is_group = is_group_jid(chat_jid)
+    participant_jid = None
+    if is_group:
+        participant_jid = _first_value(
             payload,
             (
-                "data.key.remoteJid",
-                "key.remoteJid",
+                "data.key.participant",
+                "key.participant",
+                "data.participant",
+                "participant",
                 "data.sender",
                 "sender",
-                "data.remoteJid",
-                "remoteJid",
             ),
         )
-    )
-    if not phone:
-        return _ignored(raw_event, "missing_phone")
+        participant_jid = str(participant_jid).strip() if participant_jid is not None else None
+        if not participant_jid:
+            return NormalizedWebhookMessage(
+                phone=None,
+                chat_jid=chat_jid,
+                participant_jid=None,
+                user_phone=None,
+                reply_to=chat_jid,
+                is_group=True,
+                from_me=False,
+                text=None,
+                image_url=None,
+                image_caption=None,
+                audio_url=None,
+                raw_event=raw_event,
+                ignored=True,
+                ignore_reason="missing_participant",
+            )
+
+    user_phone = normalize_whatsapp_phone(participant_jid if is_group else chat_jid)
+    if not user_phone:
+        return NormalizedWebhookMessage(
+            phone=None,
+            chat_jid=chat_jid,
+            participant_jid=participant_jid,
+            user_phone=None,
+            reply_to=chat_jid,
+            is_group=is_group,
+            from_me=False,
+            text=None,
+            image_url=None,
+            image_caption=None,
+            audio_url=None,
+            raw_event=raw_event,
+            ignored=True,
+            ignore_reason="missing_user_phone",
+        )
+
+    phone = user_phone
+    reply_to = chat_jid
 
     text = _first_value(
         payload,
@@ -158,6 +232,11 @@ def normalize_evolution_webhook(payload: dict[str, Any]) -> NormalizedWebhookMes
     if not any((text, image_url, audio_url)):
         return NormalizedWebhookMessage(
             phone=phone,
+            chat_jid=chat_jid,
+            participant_jid=participant_jid,
+            user_phone=user_phone,
+            reply_to=reply_to,
+            is_group=is_group,
             from_me=False,
             text=None,
             image_url=None,
@@ -170,6 +249,11 @@ def normalize_evolution_webhook(payload: dict[str, Any]) -> NormalizedWebhookMes
 
     return NormalizedWebhookMessage(
         phone=phone,
+        chat_jid=chat_jid,
+        participant_jid=participant_jid,
+        user_phone=user_phone,
+        reply_to=reply_to,
+        is_group=is_group,
         from_me=False,
         text=text,
         image_url=image_url,

@@ -400,3 +400,69 @@ class TestFinanceAgentGraphIntegration:
         assert len(after_prompt) == 1
         assert confirmation.startswith("Entrada registrada")
         assert len(after_confirmation) == 2
+
+    @pytest.mark.asyncio
+    @patch("app.agent.nodes.llm")
+    async def test_salary_and_food_queries_are_classified_and_filtered(self, mock_llm, monkeypatch):
+        _setup_in_memory_db(monkeypatch)
+        _create_ready_user(budget=5000)
+        database.save_transaction(
+            phone="5541999999999",
+            type=TransactionType.INCOME,
+            amount=4041.14,
+            category="Salário",
+            description="salário",
+        )
+        database.save_transaction(
+            phone="5541999999999",
+            type=TransactionType.EXPENSE,
+            amount=45,
+            category="Alimentação",
+            description="iFood",
+        )
+        database.save_transaction(
+            phone="5541999999999",
+            type=TransactionType.EXPENSE,
+            amount=180,
+            category="Lazer",
+            description="aula de futevôlei",
+        )
+        agent = FinanceAgent()
+
+        salary_response = await agent.process("5541999999999", "quanto recebi de salário?")
+        salary_question_response = await agent.process("5541999999999", "qual meu salário?")
+        salary_short_response = await agent.process("5541999999999", "meu salário?")
+        food_response = await agent.process("5541999999999", "quanto gastei com alimentação este mês?")
+        food_reordered_response = await agent.process("5541999999999", "gastei de alimentação quanto esse mês?")
+        food_qual_response = await agent.process("5541999999999", "qual foi meu gasto com alimentação esse mês?")
+
+        mock_llm.invoke.assert_not_called()
+        for response in (salary_response, salary_question_response, salary_short_response):
+            assert "Entradas de Salário" in response
+            assert "R$ 4.041,14" in response
+            assert "Total: R$ 4.041,14" in response
+        for response in (food_response, food_reordered_response, food_qual_response):
+            assert "Gastos com Alimentação" in response
+            assert "R$ 45,00" in response
+            assert "iFood" in response
+            assert "R$ 180,00" not in response
+
+    @pytest.mark.asyncio
+    @patch("app.agent.nodes.llm")
+    async def test_help_commands_are_classified_without_llm(self, mock_llm, monkeypatch):
+        _setup_in_memory_db(monkeypatch)
+        _create_ready_user()
+        agent = FinanceAgent()
+
+        help_response = await agent.process("5541999999999", "help")
+        commands_response = await agent.process("5541999999999", "quais comandos consigo rodar?")
+
+        mock_llm.invoke.assert_not_called()
+        for response in (help_response, commands_response):
+            assert "Comandos úteis:" in response
+            assert "gastei 45 no iFood" in response
+            assert "recebi 3200 de salário" in response
+            assert "resumo do mês" in response
+            assert "extrato deste mês" in response
+            assert "alterar orçamento para 5000" in response
+            assert "quanto gastei com alimentação?" in response

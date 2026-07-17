@@ -53,6 +53,8 @@ def test_resolve_period_last_30_days():
 
 def test_parse_query_request_kinds():
     assert parse_query_request("extrato deste mês").kind == QueryKind.EXTRACT
+    assert parse_query_request("help").kind == QueryKind.HELP
+    assert parse_query_request("quais comandos consigo rodar?").kind == QueryKind.HELP
     assert parse_query_request("listar minhas entradas").kind == QueryKind.LIST_INCOME
     assert parse_query_request("listar meus gastos").kind == QueryKind.LIST_EXPENSE
     assert parse_query_request("quanto recebi de salário?").kind == QueryKind.INCOME_BY_SOURCE

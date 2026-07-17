@@ -207,21 +207,29 @@ def parse_query_request(message: str, now: datetime | None = None) -> QueryReque
     period = resolve_period(message, now=now)
     text = normalize_text(message)
 
-    if "ajuda" in text or "comandos" in text:
+    if (
+        "ajuda" in text
+        or "help" in text
+        or "comando" in text
+        or "como usar" in text
+        or "o que posso" in text
+        or "consigo rodar" in text
+    ):
         return QueryRequest(kind=QueryKind.HELP, period=period)
 
     if "extrato" in text:
         return QueryRequest(kind=QueryKind.EXTRACT, period=period, limit=100)
 
+    if "salario" in text:
+        return QueryRequest(
+            kind=QueryKind.INCOME_BY_SOURCE,
+            period=period,
+            transaction_type=TransactionType.INCOME,
+            category="Salário",
+            text_filter="salário",
+        )
+
     if "entrada" in text or "recebi" in text or "recebido" in text:
-        if "salario" in text:
-            return QueryRequest(
-                kind=QueryKind.INCOME_BY_SOURCE,
-                period=period,
-                transaction_type=TransactionType.INCOME,
-                category="Salário",
-                text_filter="salario",
-            )
         return QueryRequest(kind=QueryKind.LIST_INCOME, period=period, transaction_type=TransactionType.INCOME)
 
     if "gasto" in text or "gastei" in text or "saida" in text or "saidas" in text:

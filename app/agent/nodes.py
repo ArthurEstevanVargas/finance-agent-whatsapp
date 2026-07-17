@@ -176,6 +176,21 @@ def pending_confirmation_node(state: AgentState) -> AgentState:
 def classifier_node(state: AgentState) -> AgentState:
     logger.info(f"🔍 Classificando mensagem: {state.message}")
 
+    message_text = normalize_text(state.message)
+    help_keywords = ("ajuda", "help", "comando", "como usar", "o que posso", "consigo rodar")
+    if any(keyword in message_text for keyword in help_keywords):
+        logger.info("✅ Intenção detectada por regra: query")
+        return AgentState(**{**state.model_dump(), "intent": MessageIntent.QUERY})
+
+    query_keywords = ("quanto", "qual", "listar", "mostrar", "resumo", "extrato")
+    if (
+        any(keyword in message_text for keyword in query_keywords)
+        or "meu salario" in message_text
+        or "minha renda" in message_text
+    ):
+        logger.info("✅ Intenção detectada por regra: query")
+        return AgentState(**{**state.model_dump(), "intent": MessageIntent.QUERY})
+
     prompt = CLASSIFIER_PROMPT.format(message=state.message)
     response = llm.invoke([HumanMessage(content=prompt)])
     intent = response.content.strip().lower()
@@ -443,6 +458,7 @@ def query_node(state: AgentState) -> AgentState:
             start_date=request.period.start,
             end_date=request.period.end,
             transaction_type=TransactionType.INCOME,
+            category=request.category,
             text_filter=request.text_filter or request.category,
             limit=request.limit,
         )

@@ -6,8 +6,13 @@ from langchain_core.messages import HumanMessage
 
 from app.agent.state import AgentState, MessageIntent
 from app.agent.finance_utils import (
+    CleanupTarget,
+    CleanupRequest,
+    Period,
     QueryKind,
     detect_category,
+    format_cleanup_confirmation,
+    format_cleanup_result,
     fmt_brl,
     format_budget_updated,
     format_category_detail,
@@ -17,8 +22,10 @@ from app.agent.finance_utils import (
     format_transaction_confirmation,
     format_transaction_list,
     is_salary_like,
+    is_cleanup_command,
     normalize_text,
     parse_brl_amount,
+    parse_cleanup_request,
     parse_query_request,
     resolve_period,
 )
@@ -33,6 +40,7 @@ from app.services.database import (
     save_transaction,
     get_user, create_user, update_user_name, update_user_budget,
     get_transactions, get_summary_for_period, find_possible_duplicate_income,
+    count_transactions, delete_transactions,
     create_pending_confirmation, get_active_pending_confirmation,
     resolve_pending_confirmation,
 )
@@ -131,11 +139,47 @@ def onboarding_node(state: AgentState) -> AgentState:
 # Resolve confirmações de duplicidade antes de classificar nova intenção
 # ─────────────────────────────────────────
 def pending_confirmation_node(state: AgentState) -> AgentState:
-    pending = get_active_pending_confirmation(state.phone, action_type="duplicate_income")
+    pending = get_active_pending_confirmation(state.phone)
     if not pending:
         return AgentState(**{**state.model_dump(), "intent": None})
 
     text = normalize_text(state.message).strip()
+    if pending.action_type == "monthly_cleanup":
+        if text == "confirmar limpeza":
+            payload = json.loads(pending.payload_json)
+            transaction_type = (
+                TransactionType(payload["transaction_type"])
+                if payload.get("transaction_type")
+                else None
+            )
+            deleted_count = delete_transactions(
+                phone=state.phone,
+                start_date=datetime.fromisoformat(payload["start_date"]),
+                end_date=datetime.fromisoformat(payload["end_date"]),
+                transaction_type=transaction_type,
+            )
+            resolve_pending_confirmation(pending.id, "resolved")
+            cleanup_request = CleanupRequest(
+                period=Period(
+                    label=payload["period_label"],
+                    start=datetime.fromisoformat(payload["start_date"]),
+                    end=datetime.fromisoformat(payload["end_date"]),
+                ),
+                target=CleanupTarget(payload["target"]),
+            )
+            response = format_cleanup_result(cleanup_request, deleted_count)
+            return AgentState(**{**state.model_dump(), "response": response})
+
+        if text in {"cancelar", "cancela", "não", "nao", "n"}:
+            resolve_pending_confirmation(pending.id, "cancelled")
+            return AgentState(**{**state.model_dump(), "response": "Limpeza cancelada."})
+
+        if is_cleanup_command(state.message) or any(keyword in text for keyword in ("gastei", "paguei", "recebi", "orcamento", "orçamento", "resumo", "extrato")):
+            return AgentState(**{**state.model_dump(), "intent": None})
+
+        response = 'Você tem uma limpeza pendente. Responda "confirmar limpeza" para apagar ou "cancelar" para manter.'
+        return AgentState(**{**state.model_dump(), "response": response})
+
     affirmative = {"sim", "s", "yes", "pode registrar", "registrar mesmo assim"}
     negative = {"nao", "não", "n", "cancelar"}
 
@@ -162,7 +206,7 @@ def pending_confirmation_node(state: AgentState) -> AgentState:
         resolve_pending_confirmation(pending.id, "cancelled")
         return AgentState(**{**state.model_dump(), "response": "Registro cancelado."})
 
-    if any(keyword in text for keyword in ("gastei", "paguei", "recebi", "orcamento", "orçamento", "resumo", "extrato")):
+    if is_cleanup_command(state.message) or any(keyword in text for keyword in ("gastei", "paguei", "recebi", "orcamento", "orçamento", "resumo", "extrato")):
         return AgentState(**{**state.model_dump(), "intent": None})
 
     response = 'Você tem um registro pendente. Responda "sim" para registrar ou "não" para cancelar.'
@@ -177,6 +221,10 @@ def classifier_node(state: AgentState) -> AgentState:
     logger.info(f"🔍 Classificando mensagem: {state.message}")
 
     message_text = normalize_text(state.message)
+    if is_cleanup_command(state.message):
+        logger.info("✅ Intenção detectada por regra: cleanup")
+        return AgentState(**{**state.model_dump(), "intent": MessageIntent.CLEANUP})
+
     help_keywords = ("ajuda", "help", "comando", "como usar", "o que posso", "consigo rodar")
     if any(keyword in message_text for keyword in help_keywords):
         logger.info("✅ Intenção detectada por regra: query")
@@ -195,7 +243,7 @@ def classifier_node(state: AgentState) -> AgentState:
     response = llm.invoke([HumanMessage(content=prompt)])
     intent = response.content.strip().lower()
 
-    if intent not in ["expense", "income", "query", "update_budget"]:
+    if intent not in ["expense", "income", "query", "update_budget", "cleanup"]:
         intent = MessageIntent.UNKNOWN
 
     logger.info(f"✅ Intenção detectada: {intent}")
@@ -346,6 +394,56 @@ def budget_update_node(state: AgentState) -> AgentState:
 
     update_user_budget(state.phone, amount, complete_onboarding=False)
     return AgentState(**{**state.model_dump(), "response": format_budget_updated(amount)})
+
+
+# ─────────────────────────────────────────
+# NÓ 2E: Limpeza mensal de lançamentos
+# ─────────────────────────────────────────
+def monthly_cleanup_node(state: AgentState) -> AgentState:
+    request = parse_cleanup_request(state.message)
+    transaction_type = None
+    if request.target == CleanupTarget.INCOME:
+        transaction_type = TransactionType.INCOME
+    elif request.target == CleanupTarget.EXPENSE:
+        transaction_type = TransactionType.EXPENSE
+
+    income_count = 0
+    expense_count = 0
+    if transaction_type in (None, TransactionType.INCOME):
+        income_count = count_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.INCOME,
+        )
+    if transaction_type in (None, TransactionType.EXPENSE):
+        expense_count = count_transactions(
+            phone=state.phone,
+            start_date=request.period.start,
+            end_date=request.period.end,
+            transaction_type=TransactionType.EXPENSE,
+        )
+
+    total = income_count + expense_count
+    if total == 0:
+        response = f"Não encontrei lançamentos para limpar em {request.period.label}."
+        return AgentState(**{**state.model_dump(), "response": response})
+
+    create_pending_confirmation(
+        phone=state.phone,
+        action_type="monthly_cleanup",
+        payload={
+            "message": state.message,
+            "start_date": request.period.start.isoformat(),
+            "end_date": request.period.end.isoformat(),
+            "period_label": request.period.label,
+            "target": request.target.value,
+            "transaction_type": transaction_type.value if transaction_type else None,
+        },
+        expires_at=datetime.utcnow() + timedelta(minutes=30),
+    )
+    response = format_cleanup_confirmation(request, income_count, expense_count)
+    return AgentState(**{**state.model_dump(), "response": response})
 
 
 # ─────────────────────────────────────────

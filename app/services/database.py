@@ -234,6 +234,46 @@ def get_transactions(
         return transactions
 
 
+def count_transactions(
+    phone: str,
+    start_date: datetime,
+    end_date: datetime,
+    transaction_type: TransactionType | None = None,
+) -> int:
+    """Conta transações por usuário, período e tipo opcional."""
+    with get_session() as session:
+        query = (
+            session.query(Transaction)
+            .filter(Transaction.phone == phone)
+            .filter(Transaction.created_at >= start_date)
+            .filter(Transaction.created_at < end_date)
+        )
+        if transaction_type is not None:
+            query = query.filter(Transaction.type == transaction_type)
+        return query.count()
+
+
+def delete_transactions(
+    phone: str,
+    start_date: datetime,
+    end_date: datetime,
+    transaction_type: TransactionType | None = None,
+) -> int:
+    """Apaga transações por usuário, período e tipo opcional."""
+    with get_session() as session:
+        query = (
+            session.query(Transaction)
+            .filter(Transaction.phone == phone)
+            .filter(Transaction.created_at >= start_date)
+            .filter(Transaction.created_at < end_date)
+        )
+        if transaction_type is not None:
+            query = query.filter(Transaction.type == transaction_type)
+        deleted_count = query.delete(synchronize_session=False)
+        session.commit()
+        return deleted_count
+
+
 def get_summary_for_period(phone: str, start_date: datetime, end_date: datetime) -> dict:
     """Retorna resumo financeiro entre start_date e end_date."""
     transactions = get_transactions(phone=phone, start_date=start_date, end_date=end_date)

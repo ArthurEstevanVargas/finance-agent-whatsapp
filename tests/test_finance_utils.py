@@ -1,12 +1,15 @@
 from datetime import datetime
 
 from app.agent.finance_utils import (
+    CleanupTarget,
     QueryKind,
     fmt_brl,
     format_budget_updated,
     format_help,
     format_transaction_confirmation,
+    is_cleanup_command,
     parse_brl_amount,
+    parse_cleanup_request,
     parse_query_request,
     resolve_period,
 )
@@ -63,6 +66,24 @@ def test_parse_query_request_kinds():
     assert request.category == "Alimentação"
 
 
+def test_parse_cleanup_request_targets_and_periods():
+    now = datetime(2026, 7, 17, 12, 0)
+
+    all_request = parse_cleanup_request("limpar registros de julho", now=now)
+    expense_request = parse_cleanup_request("limpar despesas de julho", now=now)
+    income_request = parse_cleanup_request("limpar entradas de julho", now=now)
+    current_month_request = parse_cleanup_request("limpar gastos deste mês", now=now)
+
+    assert is_cleanup_command("limpar registros de julho") is True
+    assert all_request.target == CleanupTarget.ALL
+    assert all_request.period.start == datetime(2026, 7, 1)
+    assert all_request.period.end == datetime(2026, 8, 1)
+    assert expense_request.target == CleanupTarget.EXPENSE
+    assert income_request.target == CleanupTarget.INCOME
+    assert current_month_request.target == CleanupTarget.EXPENSE
+    assert current_month_request.period.start == datetime(2026, 7, 1)
+
+
 def test_fixed_templates_and_help():
     assert format_transaction_confirmation(
         TransactionType.EXPENSE,
@@ -81,3 +102,4 @@ def test_fixed_templates_and_help():
     assert "gastei 45 no iFood" in help_text
     assert "extrato deste mês" in help_text
     assert "alterar orçamento para 5000" in help_text
+    assert "limpar gastos de julho" in help_text

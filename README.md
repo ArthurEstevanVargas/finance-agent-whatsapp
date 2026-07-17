@@ -20,6 +20,7 @@ Finza é um agente de IA que permite registrar gastos, entradas e comprovantes f
 | `"extrato deste mês"` | Entradas e gastos separados por data |
 | `"alterar orçamento para 5000"` | Orçamento mensal atualizado para R$ 5.000,00 |
 | `"quanto gastei com alimentação?"` | Lista filtrada por categoria e período |
+| `"limpar gastos de julho"` | Pede confirmação antes de apagar gastos do mês |
 
 ---
 
@@ -31,6 +32,7 @@ Finza é um agente de IA que permite registrar gastos, entradas e comprovantes f
 - **Resumos inteligentes** — consultas sobre orçamento, entradas, gastos, saldo e categorias
 - **Extrato mensal** — entradas e gastos separados com resumo do período
 - **Atualização de orçamento** — alteração do orçamento mensal por mensagem
+- **Limpeza mensal com confirmação** — apaga entradas, gastos ou ambos em um mês específico sem alterar o orçamento
 - **Categorização automática** — Alimentação, Transporte, Lazer, Saúde e mais
 - **Onboarding conversacional** — coleta nome e orçamento mensal na primeira interação
 - **Sistema de trial e planos** — 7 dias grátis, com planos Mensal, Trimestral e Semestral
@@ -60,6 +62,7 @@ WhatsApp → Evolution API → FastAPI (Webhook)
    expense/income → [extractor] → [duplicate_income_check] → [saver] → PostgreSQL
    update_budget  → [budget_update]      → User.monthly_budget
    query          → [query]              → Resumo/extrato financeiro
+   cleanup        → [monthly_cleanup]    → Confirmação e limpeza mensal
    unknown        → [fallback]           → Mensagem de ajuda
                         ↓
                   Evolution API → WhatsApp
@@ -103,7 +106,7 @@ finance-agent-whatsapp/
 │   │   ├── graph.py        # Grafo LangGraph + classe FinanceAgent
 │   │   ├── nodes.py        # Nós: access_check, onboarding, classifier,
 │   │   │                   #      extractor, budget_update, duplicate check,
-│   │   │                   #      saver, query, fallback
+│   │   │                   #      monthly_cleanup, saver, query, fallback
 │   │   ├── prompts.py      # Prompts do LLM 
 │   │   └── state.py        # AgentState (Pydantic) + enum MessageIntent
 │   ├── models/
@@ -213,6 +216,7 @@ resumo do mês
 extrato deste mês
 alterar orçamento para 5000
 quanto gastei com alimentação?
+limpar gastos de julho
 ```
 
 Valores aceitos incluem `4641.14`, `4.641,14`, `R$ 4.641,14`, `4641,14`, `4 mil` e `quatro mil reais`.
@@ -288,6 +292,8 @@ Para validar manualmente a integração:
 12. Envie `extrato deste mês` e confirme entradas e gastos em seções separadas.
 13. Envie `alterar orçamento para 5000` e confirme que o orçamento muda sem criar entrada.
 14. Tente registrar o mesmo salário duas vezes no mês e confirme que o agente pede autorização antes de salvar.
+15. Envie `limpar gastos de julho`, confirme que o agente pede `confirmar limpeza`, responda `cancelar` e valide que nada foi apagado.
+16. Repita `limpar gastos de julho`, responda `confirmar limpeza` e valide que só os gastos de julho foram apagados e o orçamento mensal foi mantido.
 
 ---
 

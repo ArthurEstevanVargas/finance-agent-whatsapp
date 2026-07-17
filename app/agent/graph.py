@@ -11,6 +11,7 @@ from app.agent.nodes import (
     image_extractor_node,
     duplicate_income_check_node,
     budget_update_node,
+    monthly_cleanup_node,
     saver_node,
     query_node,
     fallback_node,
@@ -48,6 +49,8 @@ def route(state: AgentState) -> str:
         return "query"
     elif state.intent == "update_budget":
         return "budget_update"
+    elif state.intent == "cleanup":
+        return "monthly_cleanup"
     else:
         return "fallback"
 
@@ -71,6 +74,7 @@ def build_graph():
     graph.add_node("image_extractor", image_extractor_node)
     graph.add_node("duplicate_income_check", duplicate_income_check_node)
     graph.add_node("budget_update", budget_update_node)
+    graph.add_node("monthly_cleanup", monthly_cleanup_node)
     graph.add_node("saver", saver_node)
     graph.add_node("query", query_node)
     graph.add_node("fallback", fallback_node)
@@ -115,6 +119,7 @@ def build_graph():
             "extractor": "extractor",
             "query": "query",
             "budget_update": "budget_update",
+            "monthly_cleanup": "monthly_cleanup",
             "fallback": "fallback",
         }
     )
@@ -138,6 +143,7 @@ def build_graph():
     graph.add_edge("saver", END)
     graph.add_edge("query", END)
     graph.add_edge("budget_update", END)
+    graph.add_edge("monthly_cleanup", END)
     graph.add_edge("fallback", END)
 
     return graph.compile()

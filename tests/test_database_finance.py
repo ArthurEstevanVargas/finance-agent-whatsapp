@@ -83,6 +83,30 @@ def test_find_possible_duplicate_income_same_month(monkeypatch):
     assert duplicate.amount == 4041.14
 
 
+def test_count_and_delete_transactions_by_month_type_and_user(monkeypatch):
+    session_factory = _setup_db(monkeypatch)
+    _insert_transaction(session_factory, "1", TransactionType.INCOME, 4000, "Salário", "salário", datetime(2026, 7, 1))
+    _insert_transaction(session_factory, "1", TransactionType.EXPENSE, 45, "Alimentação", "ifood", datetime(2026, 7, 2))
+    _insert_transaction(session_factory, "1", TransactionType.EXPENSE, 90, "Transporte", "uber", datetime(2026, 8, 2))
+    _insert_transaction(session_factory, "2", TransactionType.EXPENSE, 30, "Alimentação", "ifood", datetime(2026, 7, 2))
+
+    start = datetime(2026, 7, 1)
+    end = datetime(2026, 8, 1)
+
+    assert database.count_transactions("1", start, end) == 2
+    assert database.count_transactions("1", start, end, TransactionType.EXPENSE) == 1
+
+    deleted = database.delete_transactions("1", start, end, TransactionType.EXPENSE)
+    remaining_user_one = database.get_transactions("1")
+    remaining_user_two = database.get_transactions("2")
+
+    assert deleted == 1
+    assert len(remaining_user_one) == 2
+    assert {tx.type for tx in remaining_user_one} == {TransactionType.INCOME, TransactionType.EXPENSE}
+    assert remaining_user_one[0].created_at.month in {7, 8}
+    assert len(remaining_user_two) == 1
+
+
 def test_pending_confirmation_lifecycle(monkeypatch):
     _setup_db(monkeypatch)
 

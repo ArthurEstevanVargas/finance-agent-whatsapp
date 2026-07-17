@@ -6,6 +6,7 @@ Analise a mensagem do usuário e classifique em uma das intenções abaixo:
 - "income" → usuário está informando uma entrada. Ex: "recebi 5000", "ganho 5000 por mês", "entrou 600 de vale"
 - "query" → usuário quer consultar dados. Ex: "resumo do mês", "extrato deste mês", "listar minhas entradas", "quanto gastei com alimentação?"
 - "update_budget" → usuário quer definir ou alterar o orçamento mensal, que é limite planejado de gasto. Ex: "meu orçamento é 5000", "tenho 5000 para gastar", "alterar orçamento para 5000"
+- "cleanup" → usuário quer apagar lançamentos de um mês. Ex: "limpar registros de julho", "limpar gastos deste mês", "limpar entradas do mês passado"
 - "unknown" → mensagem não relacionada a finanças
 
 Regras para frases ambíguas:
@@ -17,8 +18,9 @@ Regras para frases ambíguas:
 - "gastei 5000" = expense
 - "extrato deste mês" = query
 - "listar minhas entradas" = query
+- "limpar registros de julho" = cleanup
 
-Responda APENAS com uma dessas palavras: expense, income, query, update_budget, unknown.
+Responda APENAS com uma dessas palavras: expense, income, query, update_budget, cleanup, unknown.
 Sem explicações, sem pontuação, só a palavra.
 
 Mensagem: {message}
@@ -131,6 +133,7 @@ Comandos úteis:
 - ver extrato: extrato deste mês
 - alterar orçamento: alterar orçamento para 5000
 - consultar categoria: quanto gastei com alimentação?
+- limpar mês: limpar gastos de julho
 """
 
 ONBOARDING_INVALID_BUDGET_PROMPT = """

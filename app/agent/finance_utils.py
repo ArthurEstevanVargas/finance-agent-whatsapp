@@ -18,6 +18,12 @@ class QueryKind(str, Enum):
     HELP = "help"
 
 
+class CleanupTarget(str, Enum):
+    ALL = "all"
+    INCOME = "income"
+    EXPENSE = "expense"
+
+
 @dataclass(frozen=True)
 class Period:
     label: str
@@ -34,6 +40,12 @@ class QueryRequest:
     category: str | None = None
     text_filter: str | None = None
     limit: int = 50
+
+
+@dataclass(frozen=True)
+class CleanupRequest:
+    period: Period
+    target: CleanupTarget
 
 
 MONTHS = {
@@ -255,6 +267,69 @@ def parse_query_request(message: str, now: datetime | None = None) -> QueryReque
     return QueryRequest(kind=QueryKind.SUMMARY, period=period)
 
 
+def is_cleanup_command(message: str) -> bool:
+    text = normalize_text(message)
+    action_terms = ("limpar", "apagar", "excluir", "deletar", "remover")
+    object_terms = (
+        "registro",
+        "registros",
+        "lancamento",
+        "lancamentos",
+        "despesa",
+        "despesas",
+        "gasto",
+        "gastos",
+        "entrada",
+        "entradas",
+    )
+    return any(term in text for term in action_terms) and any(term in text for term in object_terms)
+
+
+def parse_cleanup_request(message: str, now: datetime | None = None) -> CleanupRequest:
+    text = normalize_text(message)
+    period = resolve_period(message, now=now)
+    if "entrada" in text or "entradas" in text:
+        target = CleanupTarget.INCOME
+    elif any(term in text for term in ("despesa", "despesas", "gasto", "gastos", "saida", "saidas")):
+        target = CleanupTarget.EXPENSE
+    else:
+        target = CleanupTarget.ALL
+    return CleanupRequest(period=period, target=target)
+
+
+def cleanup_target_label(target: CleanupTarget) -> str:
+    if target == CleanupTarget.INCOME:
+        return "entradas"
+    if target == CleanupTarget.EXPENSE:
+        return "gastos"
+    return "entradas e gastos"
+
+
+def format_cleanup_confirmation(request: CleanupRequest, income_count: int, expense_count: int) -> str:
+    total = income_count + expense_count
+    lines = [
+        f"Encontrei {total} lançamento(s) em {request.period.label}:",
+        f"- Entradas: {income_count}",
+        f"- Gastos: {expense_count}",
+        "",
+        f"Esta limpeza vai apagar {cleanup_target_label(request.target)} desse período.",
+        "O orçamento mensal será mantido.",
+        "",
+        "Essa ação não pode ser desfeita.",
+        'Responda "confirmar limpeza" para apagar ou "cancelar" para manter.',
+    ]
+    return "\n".join(lines)
+
+
+def format_cleanup_result(request: CleanupRequest, deleted_count: int) -> str:
+    return (
+        "Limpeza concluída\n\n"
+        f"Período: {request.period.label}\n"
+        f"Itens apagados: {deleted_count}\n"
+        "Orçamento mensal mantido."
+    )
+
+
 def detect_category(message: str) -> str | None:
     text = normalize_text(message)
     for alias, category in CATEGORY_ALIASES.items():
@@ -295,7 +370,8 @@ def format_help() -> str:
         "- ver resumo: resumo do mês\n"
         "- ver extrato: extrato deste mês\n"
         "- alterar orçamento: alterar orçamento para 5000\n"
-        "- consultar categoria: quanto gastei com alimentação?"
+        "- consultar categoria: quanto gastei com alimentação?\n"
+        "- limpar mês: limpar gastos de julho"
     )
 
 

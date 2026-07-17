@@ -9,6 +9,7 @@ class MessageIntent(str):
     INCOME = "income"         # "recebi salário 3200"
     QUERY = "query"           # "quanto gastei essa semana?"
     UPDATE_BUDGET = "update_budget"  # "alterar orçamento para 5000"
+    CLEANUP = "cleanup"       # "limpar gastos de julho"
     UNKNOWN = "unknown"       # mensagem não reconhecida
 
 

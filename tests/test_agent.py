@@ -18,7 +18,7 @@ from app.agent.nodes import (
 )
 from app.agent.state import AgentState
 from app.agent.graph import FinanceAgent
-from app.models.transaction import Base
+from app.models.transaction import Base, Transaction
 from app.models.transaction import TransactionType
 from app.services import database
 
@@ -60,6 +60,20 @@ def _create_ready_user(phone="5541999999999", budget=3000):
     database.create_user(phone)
     database.update_user_name(phone, "Teste")
     database.update_user_budget(phone, budget)
+
+
+def _insert_transaction(session_factory, phone, type_, amount, category, description, created_at):
+    with session_factory() as session:
+        transaction = Transaction(
+            phone=phone,
+            type=type_,
+            amount=amount,
+            category=category,
+            description=description,
+            created_at=created_at,
+        )
+        session.add(transaction)
+        session.commit()
 
 
 # ─────────────────────────────────────────
@@ -466,3 +480,77 @@ class TestFinanceAgentGraphIntegration:
             assert "extrato deste mês" in response
             assert "alterar orçamento para 5000" in response
             assert "quanto gastei com alimentação?" in response
+
+    @pytest.mark.asyncio
+    @patch("app.agent.nodes.llm")
+    async def test_monthly_cleanup_deletes_income_and_expense_after_confirmation(self, mock_llm, monkeypatch):
+        session_factory = _setup_in_memory_db(monkeypatch)
+        _create_ready_user(budget=5000)
+        _insert_transaction(session_factory, "5541999999999", TransactionType.INCOME, 4041.14, "Salário", "salário", datetime(2026, 7, 1))
+        _insert_transaction(session_factory, "5541999999999", TransactionType.EXPENSE, 45, "Alimentação", "iFood", datetime(2026, 7, 3))
+        _insert_transaction(session_factory, "5541999999999", TransactionType.EXPENSE, 90, "Transporte", "Uber", datetime(2026, 8, 3))
+        agent = FinanceAgent()
+
+        prompt = await agent.process("5541999999999", "limpar registros de julho de 2026")
+        before_confirmation = database.get_transactions("5541999999999")
+        confirmation = await agent.process("5541999999999", "confirmar limpeza")
+        after_confirmation = database.get_transactions("5541999999999")
+        user = database.get_user("5541999999999")
+
+        mock_llm.invoke.assert_not_called()
+        assert "Encontrei 2 lançamento(s) em julho de 2026" in prompt
+        assert "- Entradas: 1" in prompt
+        assert "- Gastos: 1" in prompt
+        assert "O orçamento mensal será mantido." in prompt
+        assert len(before_confirmation) == 3
+        assert confirmation == (
+            "Limpeza concluída\n\n"
+            "Período: julho de 2026\n"
+            "Itens apagados: 2\n"
+            "Orçamento mensal mantido."
+        )
+        assert len(after_confirmation) == 1
+        assert after_confirmation[0].created_at.month == 8
+        assert user.monthly_budget == 5000
+
+    @pytest.mark.asyncio
+    @patch("app.agent.nodes.llm")
+    async def test_monthly_cleanup_can_delete_only_expenses_or_only_income(self, mock_llm, monkeypatch):
+        session_factory = _setup_in_memory_db(monkeypatch)
+        _create_ready_user(budget=5000)
+        _insert_transaction(session_factory, "5541999999999", TransactionType.INCOME, 4041.14, "Salário", "salário", datetime(2026, 7, 1))
+        _insert_transaction(session_factory, "5541999999999", TransactionType.EXPENSE, 45, "Alimentação", "iFood", datetime(2026, 7, 3))
+        agent = FinanceAgent()
+
+        expense_prompt = await agent.process("5541999999999", "limpar gastos de julho de 2026")
+        expense_confirmation = await agent.process("5541999999999", "confirmar limpeza")
+        after_expense_cleanup = database.get_transactions("5541999999999")
+        income_prompt = await agent.process("5541999999999", "limpar entradas de julho de 2026")
+        income_confirmation = await agent.process("5541999999999", "confirmar limpeza")
+        after_income_cleanup = database.get_transactions("5541999999999")
+
+        mock_llm.invoke.assert_not_called()
+        assert "Esta limpeza vai apagar gastos desse período." in expense_prompt
+        assert "Itens apagados: 1" in expense_confirmation
+        assert len(after_expense_cleanup) == 1
+        assert after_expense_cleanup[0].type == TransactionType.INCOME
+        assert "Esta limpeza vai apagar entradas desse período." in income_prompt
+        assert "Itens apagados: 1" in income_confirmation
+        assert after_income_cleanup == []
+
+    @pytest.mark.asyncio
+    @patch("app.agent.nodes.llm")
+    async def test_monthly_cleanup_cancel_keeps_records(self, mock_llm, monkeypatch):
+        session_factory = _setup_in_memory_db(monkeypatch)
+        _create_ready_user(budget=5000)
+        _insert_transaction(session_factory, "5541999999999", TransactionType.EXPENSE, 45, "Alimentação", "iFood", datetime(2026, 7, 3))
+        agent = FinanceAgent()
+
+        prompt = await agent.process("5541999999999", "limpar gastos de julho de 2026")
+        cancellation = await agent.process("5541999999999", "cancelar")
+        after_cancellation = database.get_transactions("5541999999999")
+
+        mock_llm.invoke.assert_not_called()
+        assert 'Responda "confirmar limpeza"' in prompt
+        assert cancellation == "Limpeza cancelada."
+        assert len(after_cancellation) == 1
